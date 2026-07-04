@@ -7,17 +7,18 @@
 
     <!-- 视图切换 -->
     <div class="view-tabs">
-      <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 数据记录</span>
-      <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别设置</span>
-      <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 开发规则</span>
-      <span :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">🚀 规则运行</span>
-      <span :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">📈 数据分析</span>
+      <span :class="{ active: view === 'collection' }" @click="view = 'collection'; loadCollections()">📁 集合</span>
+      <span :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">📈 分析</span>
+      <span :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">🚀 演算</span>
+      <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 记录</span>
+      <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别</span>
+      <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 规则</span>
     </div>
 
     <!-- 数据记录视图 -->
     <div v-if="view === 'records'" class="records-view">
       <div class="rec-header">
-        <span class="rec-title">📋 数据记录</span>
+        <span class="rec-title">📋 记录</span>
         <div style="display:flex;gap:6px">
           <select v-model="recYear" @change="loadRecords()" class="form-input" style="width:auto;padding:6px 10px;font-size:12px">
             <option value="">全部年份</option>
@@ -73,7 +74,7 @@
     <!-- 组别设置视图 -->
     <div v-if="view === 'groupset'" class="groupset-view">
       <div class="gs-header">
-        <span class="gs-title">⚙️ 组别设置</span>
+        <span class="gs-title">⚙️ 组别</span>
         <button class="btn-add" @click="openAddProject">+ 项目</button>
       </div>
       <!-- 项目切换 -->
@@ -199,7 +200,7 @@
     <!-- 开发规则视图 -->
     <div v-if="view === 'rules'" class="rules-view">
       <div class="gs-header">
-        <span class="gs-title">🔧 开发规则</span>
+        <span class="gs-title">🔧 规则</span>
         <button class="btn-add" @click="openAddRule">+ 规则</button>
       </div>
       <div v-if="devRules.length === 0" class="gs-empty">暂无规则</div>
@@ -270,7 +271,7 @@
     <!-- 规则运行视图 -->
     <div v-if="view === 'sim'" class="sim-view">
       <div class="sim-header">
-        <span class="sim-title">🚀 规则运行</span>
+        <span class="sim-title">🚀 演算</span>
         <button class="btn-add" @click="runSimDialog=!runSimDialog"
                 :class="{ running: running }" :disabled="running">
           <span v-if="running" class="btn-spin"></span>
@@ -324,7 +325,7 @@
                     v-model="simProjectRules[p.id]" class="form-input" style="flex:1">
               <option v-for="r in rulesByProject[p.id]" :key="r.id" :value="r.id">{{ r.name }}</option>
             </select>
-            <span v-else class="sim-hint" style="color:#ee0a24">⚠ 请先在组别设置中设置规则</span>
+            <span v-else class="sim-hint" style="color:#ee0a24">⚠ 请先在组别中设置规则</span>
           </template>
         </div>
         <button class="btn-submit sim-run-btn" @click="runSimulation"
@@ -404,7 +405,7 @@
     <!-- 数据分析视图 -->
     <div v-if="view === 'analysis'" class="analysis-view">
       <div class="sim-header">
-        <span class="sim-title">📈 数据分析</span>
+        <span class="sim-title">📈 分析</span>
         <div style="display:flex;gap:6px">
           <button class="btn-add-sm" @click="clearAnalysis" style="background:#ee0a24;color:#fff">🗑 清空</button>
         </div>
@@ -434,6 +435,8 @@
       <div class="an-summary card" v-if="anCumulative != null">
         <span>累计求和</span>
         <b>{{ anCumulative.toLocaleString() }}</b>
+        <span style="margin-left:16px">结果合计</span>
+        <b :style="{color: totalResult>=0?'#22c55e':'#ee0a24'}">{{ totalResult.toLocaleString() }}</b>
       </div>
 
       <!-- 表格 -->
@@ -503,6 +506,230 @@
       </div>
     </div>
 
+    <!-- 集合管理视图 -->
+    <div v-if="view === 'collection'" class="col-view">
+      <div class="sim-header">
+        <span class="sim-title">📁 集合</span>
+        <button class="btn-add" @click="openAddCollection">+ 集合</button>
+      </div>
+      <div class="col-crumb" v-if="colSel">
+        <span @click="backTo('collections')">📁 集合</span>
+        <template v-if="sumSel">
+          <span class="crumb-sep">›</span>
+          <span @click="backTo('summaries')">{{ colSel?.name }}</span>
+          <template v-if="rgSel">
+            <span class="crumb-sep">›</span>
+            <span @click="backTo('run_groups')">{{ sumSel?.name }}</span>
+            <span class="crumb-sep">›</span>
+            <span class="crumb-end">{{ rgSel?.name }}</span>
+          </template>
+        </template>
+      </div>
+      <div v-if="grid49" class="grid49-section card">
+        <div class="grid49-hd">
+          <span>📅 {{ grid49.last_date || '无数据' }}</span>
+          <span class="grid49-sum" :style="{color:gridTotalSum>=0?'#22c55e':'#ee0a24'}">累计 ¥{{ gridTotalSum.toLocaleString() }}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <div class="date-picker-field date-picker-sm" style="width:110px" @click="openDatePicker(gridDate, v => gridDate = v, $event)">
+              {{ gridDate || '选择日期' }}
+              <span class="date-arrow">📅</span>
+            </div>
+            <button class="btn-add-sm" @click="queryGridDate">🔍</button>
+            <button class="btn-add-sm" @click="copyGrid">📋</button>
+          </div>
+        </div>
+        <div class="grid49-table">
+          <div v-for="g in grid49.grid" :key="g.n" class="grid49-cell" :class="{zero:g.value===0}">
+            <span class="g49-n">{{ g.n }}</span>
+            <span class="g49-v">{{ g.value }}</span>
+          </div>
+        </div>
+        <div class="grid49-proj" v-if="grid49.projects?.length">
+          <div class="g49-proj-title" @click="showGridProj=!showGridProj">
+            各项目最新值 ({{ grid49.projects.length }}) {{ showGridProj ? '▼' : '▶' }}
+          </div>
+          <div v-if="showGridProj" class="g49-proj-list">
+            <div v-for="p in grid49.projects" :key="p.project_id" class="g49-proj-row">
+              <span>{{ p.project_name }}</span>
+              <span style="font-size:11px;color:#8899b0">{{ p.last_date }}</span>
+              <span class="g49-pv">¥{{ p.value.toLocaleString() }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-if="!colSel">
+        <div v-if="collections.length === 0"></div>
+        <div v-for="c in collections" :key="c.id" class="col-card" @click="selectCollection(c)">
+          <div class="col-card-left">
+            <span class="col-card-name">📁 {{ c.name }}</span>
+          </div>
+          <button class="col-del" @click.stop="delCollection(c.id)">🗑</button>
+          <span class="col-card-arrow">›</span>
+        </div>
+      </div>
+      <div v-if="colSel && !sumSel">
+        <div class="col-section-hd">
+          <span class="col-section-tl">{{ colSel?.name }} · 汇总列表</span>
+          <button class="btn-add-sm" @click="openAddSummary">+ 汇总</button>
+        </div>
+        <div v-if="!summaries.length" class="gs-empty">暂无汇总，点击 + 创建</div>
+        <div v-for="s in summaries" :key="s.id" class="col-card" @click="selectSummary(s)">
+          <div class="col-card-left">
+            <span class="col-card-name">📊 {{ s.name }}</span>
+            <span class="col-card-tags">
+              <span class="col-tag">{{ s.run_count || 0 }}记录</span>
+              <span class="col-tag hit">{{ s.hit_rate || 0 }}%</span>
+              <span class="col-tag days">{{ s.total_days || 0 }}天</span>
+            </span>
+          </div>
+          <span class="col-card-value" style="color:#22c55e;font-weight:700">¥{{ (s.total_value||0).toLocaleString() }}</span>
+          <button class="col-copy-btn" @click.stop="copyValue(s.total_value)" title="复制累计值">📋</button>
+          <span class="col-card-arrow">›</span>
+        </div>
+      </div>
+      <div v-if="sumSel && !rgSel">
+        <div class="col-section-hd">
+          <span class="col-section-tl">{{ sumSel?.name }} · 记录列表</span>
+          <button class="btn-add-sm" @click="openAddRunGroup">+ 记录</button>
+        </div>
+        <div v-if="!runGroups.length" class="gs-empty">暂无记录，点击 + 创建</div>
+        <div v-for="rg in runGroups" :key="rg.id" class="col-card" @click="selectRunGroup(rg)">
+          <div class="col-card-left">
+            <span class="col-card-name">📋 {{ rg.name }}</span>
+            <span class="col-card-tags">
+              <span class="col-tag">{{ rg.project_count || '-' }}项目</span>
+              <span class="col-tag hit">{{ rg.hit_rate || 0 }}%</span>
+            </span>
+          </div>
+          <span class="col-card-value" style="color:#22c55e;font-weight:700">¥{{ (rg.total_value||0).toLocaleString() }}</span>
+          <button class="col-del" @click.stop="delRunGroup(rg.id)">🗑</button>
+        </div>
+      </div>
+      <div v-if="rgSel">
+        <div class="col-section-hd">
+          <span class="col-section-tl">{{ rgSel?.name }} · 项目明细</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn-add-sm" @click="openEditItems">✏️ 修改</button>
+            <button class="btn-add-sm" @click="openRunDialog">🚀 运行</button>
+          </div>
+        </div>
+        <div class="col-summary card">
+          <span>📅 {{ rgSel?.created_at?.slice(0,10) }}</span>
+          <span>{{ rgSel?.project_count || 0 }} 项目</span>
+          <span v-if="rgSel?.hit_rate">🎯 {{ rgSel?.hit_rate }}%</span>
+        </div>
+        <div v-if="!rgItems.length" class="gs-empty">暂无项目，点击 🚀 运行</div>
+        <div v-for="it in rgItems" :key="it.id" class="col-card" style="cursor:pointer;flex-wrap:wrap" @click="openProjGrid(it)">
+          <div class="col-card-left">
+            <span class="col-card-name">{{ it.project_name }}</span>
+            <span class="col-card-tags">
+              <span class="col-tag days" v-if="getProjGrid(it.project_id).date">{{ getProjGrid(it.project_id).date }}</span>
+            </span>
+          </div>
+          <span class="col-card-value" style="color:#22c55e;font-weight:700">¥{{ (getProjGrid(it.project_id).value||0).toLocaleString() }}</span>
+        </div>
+      </div>
+      <div v-if="showRunDialog" class="form-overlay" @click.self="showRunDialog=false">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">运行模拟</div>
+          <label>日期范围</label>
+          <div class="sim-param-row">
+            <div class="date-picker-field date-picker-sm" @click="openDatePicker(runForm.start_date, v => runForm.start_date = v, $event)" style="flex:1">
+              {{ runForm.start_date || '起始日' }}
+              <span class="date-arrow">📅</span>
+            </div>
+            <span class="sim-hint">~</span>
+            <div class="date-picker-field date-picker-sm" @click="openDatePicker(runForm.end_date, v => runForm.end_date = v, $event)" style="flex:1">
+              {{ runForm.end_date || '结束日' }}
+              <span class="date-arrow">📅</span>
+            </div>
+          </div>
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showRunDialog=false">取消</button>
+            <button class="btn-submit" @click="execRunGroup" :disabled="runRunning">
+              <span v-if="runRunning" class="btn-spin"></span>
+              {{ runRunning ? '运行中...' : '开始运行' }}
+            </button>
+          </div>
+        </div>
+      </div>
+      <div v-if="showColForm" class="form-overlay" @click.self="showColForm=false">
+        <div class="form-card">
+          <div class="form-title">{{ editingColId ? '编辑集合' : '新增集合' }}</div>
+          <label>集合名称</label>
+          <input v-model="colForm.name" class="form-input" placeholder="如：测试集合1" />
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showColForm=false">取消</button>
+            <button class="btn-submit" @click="saveCollection">保存</button>
+          </div>
+        </div>
+      </div>
+      <div v-if="showSumForm" class="form-overlay" @click.self="showSumForm=false">
+        <div class="form-card">
+          <div class="form-title">新增汇总</div>
+          <label>汇总名称</label>
+          <input v-model="sumForm.name" class="form-input" placeholder="如：汇总1" />
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showSumForm=false">取消</button>
+            <button class="btn-submit" @click="saveSummary">保存</button>
+          </div>
+        </div>
+      </div>
+      <div v-if="showRgForm" class="form-overlay" @click.self="showRgForm=false">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">新增记录组</div>
+          <label>记录名称</label>
+          <input v-model="rgForm.name" class="form-input" placeholder="如：主项目1-15" />
+          <label>选择项目 ({{ rgForm.project_ids.length }})</label>
+          <div class="rg-proj-grid">
+            <div v-for="p in projects" :key="p.id"
+                 :class="['rg-proj-pill', {active:rgForm.project_ids.includes(p.id)}]"
+                 @click="toggleRgProject(p.id)">
+              {{ p.name }}
+            </div>
+          </div>
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showRgForm=false">取消</button>
+            <button class="btn-submit" @click="saveRunGroup">创建</button>
+          </div>
+        </div>
+      </div>
+      <div v-if="showEditItems" class="form-overlay" @click.self="showEditItems=false">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">修改项目 ({{ editItemsForm.project_ids.length }})</div>
+          <label>选择项目</label>
+          <div class="rg-proj-grid">
+            <div v-for="p in projects" :key="p.id"
+                 :class="['rg-proj-pill', {active:editItemsForm.project_ids.includes(p.id)}]"
+                 @click="toggleEditProject(p.id)">
+              {{ p.name }}
+            </div>
+          </div>
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showEditItems=false">取消</button>
+            <button class="btn-submit" @click="saveEditItems">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- 弹窗：单项目 49 格明细 -->
+    <div v-if="showProjDetail" class="form-overlay" @click.self="showProjDetail=false">
+      <div class="form-card" style="max-width:420px">
+        <div class="form-title">{{ projDetail?.project_name }} · 49格明细</div>
+        <div style="font-size:12px;color:#8899b0;margin-bottom:8px">📅 {{ projDetail?.last_date || '无数据' }} · 累计 ¥{{ (projDetail?.total||0).toLocaleString() }}</div>
+        <div class="grid49-table" v-if="projDetail?.grid?.length">
+          <div v-for="g in projDetail.grid" :key="g.n" class="grid49-cell" :class="{zero:g.value===0}">
+            <span class="g49-n">{{ g.n }}</span>
+            <span class="g49-v">{{ g.value }}</span>
+          </div>
+        </div>
+        <div v-else class="gs-empty" style="margin:12px 0">该项目尚未运行，无数据</div>
+        <div class="form-btns">
+          <button class="btn-cancel" @click="showProjDetail=false">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 确认弹窗 -->
     <div v-if="confirmDialog.show" class="form-overlay" @click.self="confirmDialog.cancel()">
       <div class="form-card" style="max-width:300px;text-align:center">
@@ -521,7 +748,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 
 const API = '/number-warehouse/api'
 
@@ -552,7 +779,7 @@ function $notify(msg, isError = false) {
 }
 const todayStr = new Date().toISOString().slice(0, 10)
 
-const view = ref('records')
+const view = ref('collection')
 
 // ===== 数据记录 =====
 const records = ref([])
@@ -1239,6 +1466,10 @@ const anPages = ref(1)
 const anItems = ref([])
 const anCumulative = ref(null)
 
+const totalResult = computed(() => {
+  return anItems.value.reduce((sum, it) => sum + (it.result || 0), 0)
+})
+
 async function clearAnalysis() {
   const ok = await $confirm('确定清空分析数据？（不影响原始数据记录）'); if (!ok) return
   try {
@@ -1267,6 +1498,316 @@ async function loadAnalysis() {
   } catch (e) { console.error(e) }
 }
 
+
+// ===== 集合管理 =====
+const collections = ref([])
+const colSel = ref(null)
+
+// 初始加载 + 切换时懒加载
+watch(view, (v) => {
+  if (v === 'collection' && !collections.value.length) loadCollections()
+}, { immediate: true })
+const sumSel = ref(null)
+const rgSel = ref(null)
+const summaries = ref([])
+const runGroups = ref([])
+const rgItems = ref([])
+const allSimRules = ref([])
+
+const showColForm = ref(false)
+const editingColId = ref(null)
+const colForm = ref({ name: '' })
+
+const showSumForm = ref(false)
+const sumForm = ref({ name: '' })
+
+const showRgForm = ref(false)
+const rgForm = ref({ name: '', project_ids: [] })
+
+const showRunDialog = ref(false)
+const runRunning = ref(false)
+const runForm = ref({ start_date: '2020-03-18', end_date: todayStr })
+
+const grid49 = ref(null)
+const gridDate = ref('')
+const showGridProj = ref(false)
+const gridLevel = ref('')
+const gridId = ref(null)
+const gridTotalSum = computed(() => {
+  if (!grid49.value?.grid) return 0
+  return grid49.value.grid.reduce((s, g) => s + (g.value || 0), 0)
+})
+
+const showEditItems = ref(false)
+const editItemsForm = ref({ project_ids: [] })
+const showProjDetail = ref(false)
+const projDetail = ref(null)
+
+async function loadCollections() {
+  try {
+    const res = await fetch(`${API}/collections`)
+    collections.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+async function loadAllSimRules() {
+  try {
+    const res = await fetch(`${API}/sim/rules`)
+    allSimRules.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+async function loadGrid(level, id, date = '') {
+  try {
+    let url = level === 'collection' ? `${API}/collections/${id}/grid`
+            : level === 'summary' ? `${API}/summaries/${id}/grid`
+            : `${API}/run-groups/${id}/grid`
+    if (date) url += `?date=${encodeURIComponent(date)}`
+    const res = await fetch(url)
+    grid49.value = await res.json()
+    gridLevel.value = level
+    gridId.value = id
+    gridDate.value = date || grid49.value?.last_date || ''
+  } catch (e) { grid49.value = null }
+}
+
+function queryGridDate() {
+  if (!gridDate.value || !gridLevel.value || !gridId.value) return
+  loadGrid(gridLevel.value, gridId.value, gridDate.value)
+}
+
+function copyGrid() {
+  if (!grid49.value?.grid?.length) return
+  const vals = grid49.value.grid.map(g => g.value).join('\t')
+  navigator.clipboard.writeText(vals).then(() => $notify('49值已复制(可粘贴到Excel)'), () => $notify('复制失败', true))
+}
+
+function copyValue(val) {
+  if (val === null || val === undefined) return
+  navigator.clipboard.writeText(String(val)).then(() => $notify(`已复制: ¥${val.toLocaleString()}`))
+}
+
+function getValueColor(val) {
+  return { color: (val || 0) >= 0 ? '#22c55e' : '#ee0a24', fontWeight: '700' }
+}
+
+function getProjGrid(pid) {
+  if (!grid49.value?.projects) return {}
+  const p = grid49.value.projects.find(p => p.project_id === pid)
+  return p ? { date: p.last_date, value: p.value } : {}
+}
+
+function backTo(level) {
+  if (level === 'collections') {
+    colSel.value = null; sumSel.value = null; rgSel.value = null; grid49.value = null
+  } else if (level === 'summaries') {
+    sumSel.value = null; rgSel.value = null; loadGrid('collection', colSel.value.id)
+  } else {
+    rgSel.value = null; loadGrid('summary', sumSel.value.id)
+  }
+}
+
+function selectCollection(c) {
+  colSel.value = c; sumSel.value = null; rgSel.value = null
+  loadSummaries(c.id); loadGrid('collection', c.id)
+}
+
+function selectSummary(s) {
+  sumSel.value = s; rgSel.value = null
+  loadRunGroups(s.id); loadGrid('summary', s.id)
+}
+
+function selectRunGroup(rg) {
+  rgSel.value = rg; loadRgItems(rg.id); loadGrid('run_group', rg.id)
+}
+
+async function loadSummaries(cid) {
+  try {
+    const res = await fetch(`${API}/collections/${cid}/summaries`)
+    summaries.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+async function loadRunGroups(sid) {
+  try {
+    const res = await fetch(`${API}/summaries/${sid}/run-groups`)
+    runGroups.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+async function loadRgItems(rgid) {
+  try {
+    const res = await fetch(`${API}/run-groups/${rgid}/items`)
+    rgItems.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+function openAddCollection() {
+  editingColId.value = null; colForm.value = { name: '' }; showColForm.value = true
+}
+
+async function saveCollection() {
+  if (!colForm.value.name) return $notify('请输入集合名', true)
+  try {
+    const url = editingColId.value ? `${API}/collections/${editingColId.value}` : `${API}/collections`
+    const method = editingColId.value ? 'PUT' : 'POST'
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(colForm.value) })
+    if (!res.ok) throw new Error((await res.json()).detail)
+    showColForm.value = false; loadCollections()
+  } catch (e) { $notify(e.message, true) }
+}
+
+async function delCollection(cid) {
+  const ok = await $confirm('删除集合将同时删除其下所有汇总和记录组，确定？'); if (!ok) return
+  try {
+    await fetch(`${API}/collections/${cid}`, { method: 'DELETE' })
+    loadCollections(); colSel.value = null; sumSel.value = null; rgSel.value = null; grid49.value = null
+  } catch (e) { $notify(e.message, true) }
+}
+
+function openAddSummary() {
+  sumForm.value = { name: '' }; showSumForm.value = true
+}
+
+async function saveSummary() {
+  if (!sumForm.value.name) return $notify('请输入汇总名', true)
+  try {
+    const res = await fetch(`${API}/collections/${colSel.value.id}/summaries`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sumForm.value) })
+    if (!res.ok) throw new Error((await res.json()).detail)
+    showSumForm.value = false; loadSummaries(colSel.value.id)
+  } catch (e) { $notify(e.message, true) }
+}
+
+function openAddRunGroup() {
+  if (!projects.value.length) loadProjects()
+  rgForm.value = { name: `记录${(runGroups.value.length||0)+1}`, project_ids: [] }; showRgForm.value = true
+}
+
+function toggleRgProject(pid) {
+  const idx = rgForm.value.project_ids.indexOf(pid)
+  if (idx >= 0) rgForm.value.project_ids.splice(idx, 1)
+  else rgForm.value.project_ids.push(pid)
+}
+
+async function saveRunGroup() {
+  if (!rgForm.value.name) return $notify('请输入记录名称', true)
+  if (!rgForm.value.project_ids.length) return $notify('请选择至少一个项目', true)
+  try {
+    const res = await fetch(`${API}/summaries/${sumSel.value.id}/run-groups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rgForm.value) })
+    if (!res.ok) throw new Error((await res.json()).detail)
+    const data = await res.json()
+    $notify('✅ 创建完成')
+    showRgForm.value = false; loadRunGroups(sumSel.value.id)
+    rgSel.value = { id: data.run_group_id, name: rgForm.value.name, project_count: rgForm.value.project_ids.length }
+    loadRgItems(data.run_group_id)
+  } catch (e) { $notify(e.message, true) }
+}
+
+async function delRunGroup(rgid) {
+  const ok = await $confirm('确定删除此记录组？'); if (!ok) return
+  try {
+    await fetch(`${API}/run-groups/${rgid}`, { method: 'DELETE' })
+    loadRunGroups(sumSel.value.id); rgSel.value = null; loadGrid('summary', sumSel.value.id)
+  } catch (e) { $notify(e.message, true) }
+}
+
+function openEditItems() {
+  if (!projects.value.length) loadProjects()
+  editItemsForm.value = { project_ids: rgItems.value.map(it => it.project_id) }
+  showEditItems.value = true
+}
+
+function toggleEditProject(pid) {
+  const idx = editItemsForm.value.project_ids.indexOf(pid)
+  if (idx >= 0) editItemsForm.value.project_ids.splice(idx, 1)
+  else editItemsForm.value.project_ids.push(pid)
+}
+
+async function saveEditItems() {
+  try {
+    const oldPids = rgItems.value.map(it => it.project_id)
+    const newPids = editItemsForm.value.project_ids
+    const toAdd = newPids.filter(p => !oldPids.includes(p))
+    const toDel = oldPids.filter(p => !newPids.includes(p))
+    for (const pid of toDel) {
+      const it = rgItems.value.find(x => x.project_id === pid)
+      if (it) await fetch(`${API}/run-group-items/${it.id}`, { method: 'DELETE' })
+    }
+    for (const pid of toAdd) {
+      const rule = allSimRules.value.find(r => r.project_id === pid && r.is_active)
+      const simRunId = await getActiveSimRunId(pid)
+      await fetch(`${API}/run-groups/${rgSel.value.id}/items`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: pid, sim_run_id: simRunId || 0, rule_id: rule?.id || 0 })
+      })
+    }
+    showEditItems.value = false
+    loadRgItems(rgSel.value.id)
+    loadGrid('run_group', rgSel.value.id)
+  } catch (e) { $notify(e.message, true) }
+}
+
+async function openProjGrid(it) {
+  projDetail.value = null
+  showProjDetail.value = true
+  try {
+    const res = await fetch(`${API}/run-group-items/${it.id}/grid`)
+    projDetail.value = await res.json()
+  } catch (e) { $notify(e.message, true); showProjDetail.value = false }
+}
+
+async function getActiveSimRunId(pid) {
+  try {
+    const res = await fetch(`${API}/sim/runs?project_id=${pid}`)
+    const runs = await res.json()
+    return runs.length ? runs[0].id : 0
+  } catch (e) { return 0 }
+}
+
+async function execRunGroup() {
+  if (!runForm.value.start_date || !runForm.value.end_date) return $notify('请选择日期范围', true)
+  if (!allSimRules.value.length) await loadAllSimRules()
+  runRunning.value = true
+  try {
+    const pids = editItemsForm.value.project_ids.length ? editItemsForm.value.project_ids : rgItems.value.map(it => it.project_id)
+    const rule_ids = []
+    for (const pid of pids) {
+      const rule = allSimRules.value.find(r => r.project_id === pid && r.is_active)
+      rule_ids.push(rule ? rule.id : 0)
+    }
+    const res = await fetch(`${API}/sim/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rule_ids, project_ids: pids, start_date: runForm.value.start_date, end_date: runForm.value.end_date })
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '运行失败')
+
+    // 更新项目关联
+    for (const run of data.runs || []) {
+      if (run.project_id) {
+        const existingIt = rgItems.value.find(it => it.project_id === run.project_id)
+        if (existingIt) {
+          await fetch(`${API}/run-group-items/${existingIt.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sim_run_id: run.run_id })
+          })
+        }
+      }
+    }
+    $notify(`✅ 运行完成 (${data.runs?.length || 0} 项目)`)
+    showRunDialog.value = false
+    loadRgItems(rgSel.value.id)
+    loadGrid('run_group', rgSel.value.id)
+  } catch (e) { $notify(e.message, true) }
+  runRunning.value = false
+}
+
+function openRunDialog() {
+  runForm.value = { start_date: '2020-03-18', end_date: todayStr }
+  showRunDialog.value = true
+}
 </script>
 
 <style>
@@ -1615,4 +2156,49 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   background: #4da6ff; color: #fff; font-weight: 700;
 }
 .cal-day.today.active { background: #4da6ff; color: #fff; }
+</style>
+
+<style scoped>
+/* ===== 集合管理 ===== */
+.col-view { padding: 0 12px 40px; }
+.col-crumb { display: flex; align-items: center; gap: 6px; padding: 10px 4px; font-size: 13px; color: #8899b0; flex-wrap: wrap; }
+.col-crumb span { cursor: pointer; color: #4da6ff; }
+.col-crumb .crumb-sep { color: #ccc; cursor: default; }
+.col-crumb .crumb-end { color: #1a2a4a; font-weight: 700; cursor: default; }
+.col-section-hd { display: flex; justify-content: space-between; align-items: center; padding: 12px 4px 8px; }
+.col-section-tl { font-size: 15px; font-weight: 700; color: #1a2a4a; }
+.col-card { display: flex; align-items: center; justify-content: space-between; background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.04); cursor: pointer; transition: all .15s; }
+.col-card:active { background: #f0f4f8; transform: scale(.98); }
+.col-card-left { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.col-card-name { font-size: 14px; font-weight: 700; color: #1a2a4a; }
+.col-card-arrow { font-size: 20px; color: #ccc; }
+.col-card-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.col-tag { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #eef3ff; color: #4da6ff; font-weight: 600; }
+.col-tag.hit { background: #f0fdf4; color: #22c55e; }
+.col-tag.days { background: #f0f4f8; color: #8899b0; }
+.col-tag.rule { background: #fff8e1; color: #f59e0b; }
+.col-card-hit { font-size: 14px; font-weight: 700; }
+.col-card-value { font-size: 15px; flex-shrink: 0; margin: 0 4px; }
+.col-del { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; border: none; font-size: 14px; cursor: pointer; background: #fff0f0; flex-shrink: 0; margin-left: 8px; }
+.col-copy-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: none; font-size: 12px; cursor: pointer; background: #f0f4f8; flex-shrink: 0; transition: all .15s; }
+.col-copy-btn:active { background: #4da6ff22; transform: scale(.9); }
+.col-summary { display: flex; justify-content: space-between; align-items: center; font-size: 13px; flex-wrap: wrap; gap: 8px; }
+.rg-proj-grid { display: flex; flex-wrap: wrap; gap: 6px; max-height: 200px; overflow-y: auto; padding: 4px 0; }
+.rg-proj-pill { padding: 5px 14px; border-radius: 14px; font-size: 13px; background: #f0f4f8; color: #8899b0; cursor: pointer; font-weight: 600; transition: all .15s; }
+.rg-proj-pill.active { background: linear-gradient(135deg, #4da6ff, #1a2a4a); color: #fff; }
+
+/* ===== 49值网格 ===== */
+.grid49-section { padding: 12px; margin: 8px 0; }
+.grid49-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; flex-wrap: wrap; gap: 4px; }
+.grid49-sum { font-weight: 700; font-size: 14px; }
+.grid49-table { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.grid49-cell { font-size: 10px; padding: 4px 2px; border-radius: 6px; background: #f8fafc; display: flex; flex-direction: column; align-items: center; }
+.grid49-cell.zero { opacity: .3; }
+.g49-n { color: #8899b0; font-size: 9px; }
+.g49-v { color: #1a2a4a; font-weight: 700; font-size: 12px; }
+.grid49-proj { margin-top: 8px; border-top: 1px solid #eee; padding-top: 8px; }
+.g49-proj-title { font-size: 12px; color: #8899b0; cursor: pointer; padding: 4px 0; }
+.g49-proj-list { padding: 4px 0; }
+.g49-proj-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; }
+.g49-pv { font-weight: 700; color: #22c55e; }
 </style>

@@ -154,6 +154,52 @@ def init_db():
             result INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now','localtime'))
         );
+        CREATE TABLE IF NOT EXISTS collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            remark TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (collection_id) REFERENCES collections(id)
+        );
+        CREATE TABLE IF NOT EXISTS run_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            summary_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            total_days INTEGER DEFAULT 0,
+            hit_count INTEGER DEFAULT 0,
+            profit INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (summary_id) REFERENCES summaries(id)
+        );
+        CREATE TABLE IF NOT EXISTS run_group_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_group_id INTEGER NOT NULL,
+            sim_run_id INTEGER NOT NULL DEFAULT 0,
+            project_id INTEGER NOT NULL,
+            project_name TEXT DEFAULT '',
+            total_days INTEGER DEFAULT 0,
+            hit_count INTEGER DEFAULT 0,
+            profit INTEGER DEFAULT 0,
+            UNIQUE(run_group_id, project_id),
+            FOREIGN KEY (run_group_id) REFERENCES run_groups(id),
+            FOREIGN KEY (sim_run_id) REFERENCES sim_runs(id)
+        );
+        CREATE TABLE IF NOT EXISTS run_group_stats (
+            run_group_id INTEGER PRIMARY KEY,
+            project_count INTEGER DEFAULT 0,
+            total_days INTEGER DEFAULT 0,
+            hit_count INTEGER DEFAULT 0,
+            hit_rate REAL DEFAULT 0,
+            profit INTEGER DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (run_group_id) REFERENCES run_groups(id)
+        );
     """)
     # 初始化配置
     for k, v in [("mapping", json.dumps(DEFAULT_MAPPING, ensure_ascii=False)),
@@ -192,6 +238,10 @@ def init_db():
     except Exception: pass
     try:
         db.execute("ALTER TABLE sim_runs ADD COLUMN project_name TEXT DEFAULT ''")
+    except Exception: pass
+    # 集合管理层：run_group_id 外键
+    try:
+        db.execute("ALTER TABLE sim_runs ADD COLUMN run_group_id INTEGER DEFAULT NULL")
     except Exception: pass
     # 分时段表新增时间列
     try:
@@ -1068,6 +1118,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     groups = {g: list(base[g]) for g in GROUPS}
     counts = {g: 1 for g in GROUPS}
     day_offset = 0  # 已运行天数
+    reset_tomorrow = set()  # 昨天命中的组，今天重置为1
 
     # 生成日期序列
     sd = date.fromisoformat(start_date)
@@ -1087,6 +1138,28 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     for rec in records:
         if rec["draw_number"] is not None and rec["draw_number"] != 0:
             records_by_date[rec["date"]] = rec["draw_number"]
+
+    # === 严格限制：end_date = 最新抽签日期 + 1天（只允许一天待开） ===
+    if records_by_date:
+        max_record_date = max(records_by_date.keys())
+        max_allowed = (date.fromisoformat(max_record_date) + timedelta(days=1)).isoformat()
+        if max_allowed < end_date:
+            end_date = max_allowed
+            ed = date.fromisoformat(end_date)
+            all_dates = []
+            d = sd
+            while d <= ed:
+                all_dates.append(d.isoformat())
+                d += timedelta(days=1)
+    elif existing:
+        # 完全没有新记录→保持已有范围，不扩展
+        end_date = existing["end_date"]
+        ed = date.fromisoformat(end_date)
+        all_dates = []
+        d = sd
+        while d <= ed:
+            all_dates.append(d.isoformat())
+            d += timedelta(days=1)
 
     if not all_dates:
         raise HTTPException(400, "无效日期范围")
@@ -1124,6 +1197,16 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 for r in prev_results:
                     groups[r["group_name"]] = json.loads(r["numbers_json"])
                     counts[r["group_name"]] = r["count_n"]
+                # 补偿存储时的+1（数据库存的是当天递增前的值，需要恢复为当天结束时的值）
+                for g in GROUPS:
+                    counts[g] = counts.get(g, 1) + 1
+                # 检查前一天是否有命中，有则次日需要重置
+                prev_hit = db.execute(
+                    "SELECT hit_group FROM sim_results WHERE run_id=? AND date=? AND hit_group IS NOT NULL LIMIT 1",
+                    (existing["id"], prev_date)
+                ).fetchone()
+                if prev_hit:
+                    reset_tomorrow.add(prev_hit["hit_group"])
                 # 计算到前一天为止的天数
                 prev_day_count = db.execute(
                     "SELECT COUNT(DISTINCT date) FROM sim_results WHERE run_id=? AND date <= ?",
@@ -1148,6 +1231,16 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 for r in last_results:
                     groups[r["group_name"]] = json.loads(r["numbers_json"])
                     counts[r["group_name"]] = r["count_n"]
+            # 补偿存储时的+1（数据库存的是当天递增前的值，需要恢复为当天结束时的值）
+            for g in GROUPS:
+                counts[g] = counts.get(g, 1) + 1
+            # 检查最后一天是否有命中，有则次日需要重置
+            last_hit = db.execute(
+                "SELECT hit_group FROM sim_results WHERE run_id=? AND date=? AND hit_group IS NOT NULL LIMIT 1",
+                (existing["id"], existing_end)
+            ).fetchone()
+            if last_hit:
+                reset_tomorrow.add(last_hit["hit_group"])
             day_offset = existing["total_days"]
             run_id = existing["id"]
             is_new_run = False
@@ -1190,6 +1283,15 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         if not skip_rotate and day_offset + day_idx >= 1:
             groups = rotate_left_n(groups, shift)
 
+        # === 第一步：应用昨日命中的重置（命中次日才重置为1）===
+        if is_first_day:
+            counts = {g: 1 for g in GROUPS}
+        else:
+            for g in reset_tomorrow:
+                counts[g] = 1
+        reset_tomorrow.clear()
+
+        # === 第二步：检测今天是否命中 ===
         hit_group = None
         if draw is not None:
             for g in GROUPS:
@@ -1200,10 +1302,9 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         else:
             pending_count += 1
 
-        if day_offset + day_idx == 0:
-            counts = {g: 1 for g in GROUPS}
-
         pre_hit = counts.get(hit_group) if hit_group else None
+
+        # === 第三步：存储（当天开始时的次数）===
         for g in GROUPS:
             db.execute(
                 "INSERT OR REPLACE INTO sim_results (run_id, date, draw_number, hit_group, group_name, numbers_json, count_n, pre_hit_count_n) "
@@ -1213,13 +1314,13 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                  pre_hit if g == hit_group else None)
             )
 
-        new_counts = {}
+        # === 第四步：每天统一递增（命中组也不例外，次日才重置）===
         for g in GROUPS:
-            if g == hit_group:
-                new_counts[g] = 1
-            else:
-                new_counts[g] = counts.get(g, 1) + 1
-        counts = new_counts
+            counts[g] = counts.get(g, 1) + 1
+
+        # === 第五步：标记今天命中的组，明天重置 ===
+        if hit_group:
+            reset_tomorrow.add(hit_group)
 
     total_days = day_offset + len(process_dates)
     if is_new_run or pending_days:
@@ -1272,7 +1373,7 @@ def list_sim_runs(rule_id: Optional[int] = None, project_id: Optional[int] = Non
 
 
 @app.get("/api/sim/runs/{run_id}")
-def get_sim_run(run_id: int):
+def get_sim_run(run_id: int, limit: Optional[int] = Query(None)):
     db = get_db()
     run = db.execute(
         "SELECT r.*, s.name as rule_name, s.shift_amount FROM sim_runs r "
@@ -1283,16 +1384,23 @@ def get_sim_run(run_id: int):
         db.close()
         raise HTTPException(404, "运行不存在")
 
-    # 按日期分组结果
-    results = db.execute(
-        "SELECT * FROM sim_results WHERE run_id=? ORDER BY date, group_name",
-        (run_id,)
-    ).fetchall()
+    # 预加载次数→值映射
+    count_values = {}
+    for row in db.execute("SELECT count_n, value FROM count_value_map").fetchall():
+        count_values[row["count_n"]] = row["value"]
 
-    # 按天组织
+    # 按日期分组结果（desc，限制天数）
+    seen_dates = set()
     daily = {}
-    for r in results:
+    for r in db.execute(
+        "SELECT * FROM sim_results WHERE run_id=? ORDER BY date DESC, group_name",
+        (run_id,)
+    ).fetchall():
         dt = r["date"]
+        if dt not in seen_dates:
+            if limit and len(seen_dates) >= limit:
+                break
+            seen_dates.add(dt)
         if dt not in daily:
             daily[dt] = {
                 "date": dt,
@@ -1303,13 +1411,13 @@ def get_sim_run(run_id: int):
         daily[dt]["groups"][r["group_name"]] = {
             "numbers": json.loads(r["numbers_json"]),
             "count_n": r["count_n"],
-            "value": get_count_value(r["count_n"], db)
+            "value": count_values.get(r["count_n"], 0)
         }
 
     db.close()
     return {
         "run": dict(run),
-        "daily": [daily[k] for k in sorted(daily.keys(), reverse=True)]
+        "daily": [daily[k] for k in sorted(daily.keys(), reverse=True)],
     }
 
 
@@ -1379,6 +1487,9 @@ def query_sim_results(
         params.append(end_date)
 
     where = " AND ".join(wheres)
+    # 只取每个项目的最新一次运行
+    sub = f"SELECT MAX(id) FROM sim_runs r2 WHERE r2.project_id = r.project_id"
+    where += f" AND r.id = ({sub})"
     total = db.execute(f"SELECT COUNT(*) FROM sim_runs r WHERE {where}", params).fetchone()[0]
 
     offset = (page - 1) * page_size
@@ -1649,6 +1760,565 @@ def get_analysis(start_date: str = "2020-03-18", end_date: str = "2026-07-03",
         "page_size": page_size,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "cumulative_sum": final_cumulative,
+    }
+
+
+# ==================== 集合管理 ====================
+
+class CollectionIn(BaseModel):
+    name: str
+
+class SummaryIn(BaseModel):
+    name: str
+
+class RunGroupIn(BaseModel):
+    name: str
+    project_ids: list = []  # 要包含的项目ID列表
+
+class RunGroupItemUpdate(BaseModel):
+    project_ids: list = []  # 要设为的项目ID列表（全量替换）
+
+
+@app.get("/api/collections")
+def list_collections():
+    """列出所有集合"""
+    db = get_db()
+    rows = db.execute("SELECT * FROM collections ORDER BY id DESC").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/collections")
+def create_collection(c: CollectionIn):
+    db = get_db()
+    db.execute("INSERT INTO collections (name) VALUES (?)", (c.name,))
+    db.commit()
+    row = db.execute("SELECT * FROM collections WHERE rowid=last_insert_rowid()").fetchone()
+    db.close()
+    return {"ok": True, "collection": dict(row)}
+
+
+@app.put("/api/collections/{cid}")
+def update_collection(cid: int, c: CollectionIn):
+    db = get_db()
+    db.execute("UPDATE collections SET name=? WHERE id=?", (c.name, cid))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/collections/{cid}")
+def delete_collection(cid: int):
+    """删除集合及其下所有汇总+记录组"""
+    db = get_db()
+    sums = db.execute("SELECT id FROM summaries WHERE collection_id=?", (cid,)).fetchall()
+    for s in sums:
+        rgs = db.execute("SELECT id FROM run_groups WHERE summary_id=?", (s["id"],)).fetchall()
+        for rg in rgs:
+            db.execute("DELETE FROM run_group_items WHERE run_group_id=?", (rg["id"],))
+            db.execute("DELETE FROM run_group_stats WHERE run_group_id=?", (rg["id"],))
+        db.execute("DELETE FROM run_groups WHERE summary_id=?", (s["id"],))
+    db.execute("DELETE FROM summaries WHERE collection_id=?", (cid,))
+    db.execute("DELETE FROM collections WHERE id=?", (cid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+# --- 汇总 ---
+
+@app.get("/api/collections/{cid}/summaries")
+def list_summaries(cid: int):
+    """列出某集合下所有汇总，含聚合统计"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT s.*, "
+        "  (SELECT COUNT(*) FROM run_groups WHERE summary_id=s.id) as run_count, "
+        "  (SELECT COALESCE(SUM(project_count),0) FROM run_group_stats WHERE run_group_id IN (SELECT id FROM run_groups WHERE summary_id=s.id)) as project_count, "
+        "  (SELECT COALESCE(SUM(hit_count),0) FROM run_group_stats WHERE run_group_id IN (SELECT id FROM run_groups WHERE summary_id=s.id)) as hit_count, "
+        "  (SELECT COALESCE(SUM(total_days),0) FROM run_group_stats WHERE run_group_id IN (SELECT id FROM run_groups WHERE summary_id=s.id)) as total_days, "
+        "  (SELECT COALESCE(SUM(profit),0) FROM run_group_stats WHERE run_group_id IN (SELECT id FROM run_groups WHERE summary_id=s.id)) as total_value "
+        "FROM summaries s WHERE s.collection_id=? ORDER BY s.id DESC",
+        (cid,)
+    ).fetchall()
+    db.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["hit_rate"] = round(d["hit_count"]/d["total_days"]*100, 1) if d["total_days"] else 0
+        result.append(d)
+    return result
+
+
+@app.post("/api/collections/{cid}/summaries")
+def create_summary(cid: int, s: SummaryIn):
+    db = get_db()
+    db.execute("INSERT INTO summaries (collection_id, name) VALUES (?,?)", (cid, s.name))
+    db.commit()
+    row = db.execute("SELECT * FROM summaries WHERE rowid=last_insert_rowid()").fetchone()
+    db.close()
+    return {"ok": True, "summary": dict(row)}
+
+
+@app.put("/api/summaries/{sid}")
+def update_summary(sid: int, s: SummaryIn):
+    db = get_db()
+    db.execute("UPDATE summaries SET name=? WHERE id=?", (s.name, sid))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/summaries/{sid}")
+def delete_summary(sid: int):
+    db = get_db()
+    rgs = db.execute("SELECT id FROM run_groups WHERE summary_id=?", (sid,)).fetchall()
+    for rg in rgs:
+        db.execute("DELETE FROM run_group_items WHERE run_group_id=?", (rg["id"],))
+        db.execute("DELETE FROM run_group_stats WHERE run_group_id=?", (rg["id"],))
+    db.execute("DELETE FROM run_groups WHERE summary_id=?", (sid,))
+    db.execute("DELETE FROM summaries WHERE id=?", (sid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+# --- 记录组 (Run Group) ---
+
+@app.get("/api/summaries/{sid}/run-groups")
+def list_run_groups(sid: int):
+    """列出汇总下所有记录组（含各记录累计结果值）"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT rg.*, rgs.project_count, rgs.hit_rate "
+        "FROM run_groups rg LEFT JOIN run_group_stats rgs ON rg.id=rgs.run_group_id "
+        "WHERE rg.summary_id=? ORDER BY rg.id DESC",
+        (sid,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        # 计算该记录组的 49 格累计总值
+        items = db.execute("SELECT project_id FROM run_group_items WHERE run_group_id=?", (d["id"],)).fetchall()
+        pids = [i["project_id"] for i in items]
+        grid_data = _build_49_grid(db, pids) if pids else {"grid": []}
+        d["total_value"] = sum(g["value"] for g in grid_data.get("grid", []))
+        result.append(d)
+    db.close()
+    return result
+
+
+@app.post("/api/summaries/{sid}/run-groups")
+def create_run_group(sid: int, body: RunGroupIn):
+    """创建记录组容器（不运行模拟），关联选中的项目"""
+    if not body.project_ids:
+        raise HTTPException(400, "至少选一个项目")
+    db = get_db()
+    summary = db.execute("SELECT * FROM summaries WHERE id=?", (sid,)).fetchone()
+    if not summary:
+        db.close()
+        raise HTTPException(404, "汇总不存在")
+
+    db.execute("INSERT INTO run_groups (summary_id, name) VALUES (?,?)", (sid, body.name))
+    rg_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    for pid in body.project_ids:
+        proj_name = db.execute("SELECT name FROM projects WHERE id=? AND deleted_at IS NULL", (pid,)).fetchone()
+        proj_name = proj_name["name"] if proj_name else f"项目{pid}"
+        db.execute(
+            "INSERT INTO run_group_items (run_group_id, sim_run_id, project_id, project_name) VALUES (?,0,?,?)",
+            (rg_id, pid, proj_name)
+        )
+
+    # 自动关联已有 sim_runs
+    _link_existing_sim_runs(db, rg_id)
+
+    # 刷新统计
+    _refresh_run_group_stats(db, rg_id)
+    db.commit()
+    db.close()
+    return {"ok": True, "run_group_id": rg_id}
+
+
+def _link_existing_sim_runs(db, rg_id: int):
+    """为记录组关联已有 sim_runs（每个项目取最新一条，不限归属）"""
+    items = db.execute(
+        "SELECT id, project_id FROM run_group_items WHERE run_group_id=? AND sim_run_id=0", (rg_id,)
+    ).fetchall()
+    for it in items:
+        latest = db.execute(
+            "SELECT id FROM sim_runs WHERE project_id=? ORDER BY id DESC LIMIT 1",
+            (it["project_id"],)
+        ).fetchone()
+        if latest:
+            db.execute("UPDATE run_group_items SET sim_run_id=? WHERE id=?", (latest["id"], it["id"]))
+            db.execute("UPDATE sim_runs SET run_group_id=? WHERE id=?", (rg_id, latest["id"]))
+
+
+def _refresh_run_group_stats(db, rg_id: int):
+    """重建记录组统计，含profit（各项目分析累计值之和）"""
+    items = db.execute(
+        "SELECT rgi.id, rgi.sim_run_id FROM run_group_items rgi WHERE rgi.run_group_id=? AND rgi.sim_run_id > 0", (rg_id,)
+    ).fetchall()
+    if not items:
+        db.execute("INSERT OR REPLACE INTO run_group_stats (run_group_id, project_count, total_days, hit_count, hit_rate, profit) VALUES (?,0,0,0,0,0)", (rg_id,))
+        return
+    sim_ids = [i["sim_run_id"] for i in items]
+    placeholders = ",".join("?" * len(sim_ids))
+    rows = db.execute(
+        f"SELECT COALESCE(SUM(total_days),0) as td, COALESCE(SUM(hit_count),0) as hc FROM sim_runs WHERE id IN ({placeholders})",
+        sim_ids
+    ).fetchone()
+    td, hc = rows["td"], rows["hc"]
+    hr = round(hc / td * 100, 1) if td else 0
+
+    # 计算 profit：每个项目的最后一次累计值之和
+    sim_runs = db.execute(
+        f"SELECT project_id, hit_count, total_days FROM sim_runs WHERE id IN ({placeholders})", sim_ids
+    ).fetchall()
+    project_ids = list(set(r["project_id"] for r in sim_runs))
+    total_profit = 0
+    for pid in project_ids:
+        last = db.execute(
+            "SELECT cumulative_sum FROM analysis_daily WHERE project_id=? ORDER BY date DESC LIMIT 1", (pid,)
+        ).fetchone()
+        total_profit += last["cumulative_sum"] if last else 0
+
+    db.execute(
+        "INSERT OR REPLACE INTO run_group_stats (run_group_id, project_count, total_days, hit_count, hit_rate, profit) VALUES (?,?,?,?,?,?)",
+        (rg_id, len(items), td, hc, hr, total_profit)
+    )
+
+
+def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
+    """给定项目ID列表，聚合 49 格。target_date 指定日期，不传则取最新日"""
+    value_map = get_count_map_dict(db)
+    if not project_ids:
+        return {"last_date": "", "grid": [], "projects": []}
+
+    p = ",".join("?" * len(project_ids))
+
+    # 每个项目取最新一条 sim_run
+    run_rows = db.execute(
+        f"SELECT srn.id, srn.project_id, srn.project_name, srn.hit_count, srn.total_days "
+        f"FROM sim_runs srn WHERE srn.project_id IN ({p}) "
+        f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id=srn.project_id) "
+        f"ORDER BY srn.project_id",
+        project_ids
+    ).fetchall()
+
+    if not run_rows:
+        return {"last_date": "", "grid": [], "projects": []}
+
+    run_ids = [r["id"] for r in run_rows]
+    rp = ",".join("?" * len(run_ids))
+
+    if target_date:
+        use_date = target_date
+    else:
+        last = db.execute(
+            f"SELECT MAX(date) as dt FROM sim_results WHERE run_id IN ({rp})", run_ids
+        ).fetchone()
+        use_date = last["dt"] or ""
+
+    # 各项目指定日期的值
+    projects = []
+    for pr in run_rows:
+        day = db.execute(
+            "SELECT date, hit_group FROM sim_results WHERE run_id=? AND date=? LIMIT 1",
+            (pr["id"], use_date)
+        ).fetchone()
+        proj_val = 0
+        if day:
+            groups = db.execute(
+                "SELECT group_name, count_n, numbers_json FROM sim_results WHERE run_id=? AND date=?",
+                (pr["id"], day["date"])
+            ).fetchall()
+            for g in groups:
+                nums = json.loads(g["numbers_json"])
+                proj_val += value_map.get(g["count_n"], 0) * len(nums)
+        projects.append({
+            "project_id": pr["project_id"], "project_name": pr["project_name"],
+            "last_date": day["date"] if day else (use_date if target_date else ""),
+            "hit_group": day["hit_group"] if day else "",
+            "value": proj_val,
+            "hit_count": pr["hit_count"], "total_days": pr["total_days"],
+        })
+
+    # 49格
+    grid = {n: 0 for n in range(1, 50)}
+    for pr in run_rows:
+        day = db.execute(
+            "SELECT date FROM sim_results WHERE run_id=? AND date=? LIMIT 1",
+            (pr["id"], use_date)
+        ).fetchone()
+        if not day: continue
+        groups = db.execute(
+            "SELECT group_name, count_n, numbers_json FROM sim_results WHERE run_id=? AND date=?",
+            (pr["id"], use_date)
+        ).fetchall()
+        for g in groups:
+            nums = json.loads(g["numbers_json"])
+            val = value_map.get(g["count_n"], 0)
+            for n in nums:
+                grid[n] = grid.get(n, 0) + val
+
+    grid_list = [{"n": n, "value": grid[n]} for n in range(1, 50)]
+    # 补全项目
+    proj_miss = db.execute(
+        f"SELECT id, name FROM projects WHERE id IN ({p}) AND deleted_at IS NULL", project_ids
+    ).fetchall()
+    shown_ids = {pr["project_id"] for pr in projects}
+    for pm in proj_miss:
+        if pm["id"] not in shown_ids:
+            projects.append({
+                "project_id": pm["id"], "project_name": pm["name"],
+                "last_date": use_date if target_date else "",
+                "hit_group": "", "value": 0, "hit_count": 0, "total_days": 0,
+            })
+
+    return {"last_date": use_date, "grid": grid_list, "projects": projects}
+
+
+@app.get("/api/run-groups/{rgid}/grid")
+def get_run_group_grid(rgid: int, date: str = None):
+    """记录组: 49值聚合（按项目最新 sim_run）"""
+    db = get_db()
+    items = db.execute(
+        "SELECT project_id FROM run_group_items WHERE run_group_id=?", (rgid,)
+    ).fetchall()
+    ids = [i["project_id"] for i in items]
+    result = _build_49_grid(db, ids, date)
+    db.close()
+    return result
+
+
+@app.get("/api/summaries/{sid}/grid")
+def get_summary_grid(sid: int, date: str = None):
+    """汇总: 49值聚合(跨所有记录组)"""
+    db = get_db()
+    items = db.execute(
+        "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+        "JOIN run_groups rg ON rgi.run_group_id=rg.id "
+        "WHERE rg.summary_id=?", (sid,)
+    ).fetchall()
+    ids = [i["project_id"] for i in items]
+    result = _build_49_grid(db, ids, date)
+    db.close()
+    return result
+
+
+@app.get("/api/collections/{cid}/grid")
+def get_collection_grid(cid: int, date: str = None):
+    """集合: 49值聚合(跨所有汇总)"""
+    db = get_db()
+    items = db.execute(
+        "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+        "JOIN run_groups rg ON rgi.run_group_id=rg.id "
+        "JOIN summaries s ON rg.summary_id=s.id "
+        "WHERE s.collection_id=?", (cid,)
+    ).fetchall()
+    ids = [i["project_id"] for i in items]
+    result = _build_49_grid(db, ids, date)
+    db.close()
+    return result
+
+
+class RunGroupExec(BaseModel):
+    start_date: str
+    end_date: str
+
+
+@app.post("/api/run-groups/{rgid}/run")
+def exec_run_group(rgid: int, body: RunGroupExec):
+    """为记录组所有项目运行模拟（自动取各项目绑定的规则）"""
+    db = get_db()
+    rg = db.execute("SELECT * FROM run_groups WHERE id=?", (rgid,)).fetchone()
+    if not rg:
+        db.close()
+        raise HTTPException(404, "记录组不存在")
+
+    items = db.execute(
+        "SELECT id, project_id FROM run_group_items WHERE run_group_id=?", (rgid,)
+    ).fetchall()
+    if not items:
+        db.close()
+        raise HTTPException(400, "记录组内无项目")
+
+    results = []
+    for it in items:
+        # 自动取该项目绑定的活跃规则
+        rule = db.execute(
+            "SELECT id FROM sim_rules WHERE project_id=? AND is_active=1 ORDER BY id LIMIT 1",
+            (it["project_id"],)
+        ).fetchone()
+        if not rule:
+            results.append({"project_id": it["project_id"], "error": "该项目无活跃规则"})
+            continue
+        r = run_simulation(db, rule["id"], body.start_date, body.end_date, it["project_id"])
+        db.execute("UPDATE run_group_items SET sim_run_id=? WHERE id=?", (r["run_id"], it["id"]))
+        db.execute("UPDATE sim_runs SET run_group_id=? WHERE id=?", (rgid, r["run_id"]))
+        results.append({"project_id": it["project_id"], "rule_id": rule["id"], "run_id": r["run_id"], **r})
+
+    _refresh_run_group_stats(db, rgid)
+    db.commit()
+    db.close()
+    return {"ok": True, "runs": results}
+
+
+@app.delete("/api/run-groups/{rgid}")
+def delete_run_group(rgid: int):
+    """删除记录组及其项目关联"""
+    db = get_db()
+    items = db.execute("SELECT sim_run_id FROM run_group_items WHERE run_group_id=?", (rgid,)).fetchall()
+    for it in items:
+        db.execute("UPDATE sim_runs SET run_group_id=NULL WHERE id=?", (it["sim_run_id"],))
+    db.execute("DELETE FROM run_group_items WHERE run_group_id=?", (rgid,))
+    db.execute("DELETE FROM run_group_stats WHERE run_group_id=?", (rgid,))
+    db.execute("DELETE FROM run_groups WHERE id=?", (rgid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.put("/api/run-groups/{rgid}/items")
+def update_run_group_items(rgid: int, body: RunGroupItemUpdate):
+    """修改记录组项目列表（全量替换），方便增减项目"""
+    if not body.project_ids:
+        raise HTTPException(400, "至少保留一个项目")
+    db = get_db()
+    rg = db.execute("SELECT * FROM run_groups WHERE id=?", (rgid,)).fetchone()
+    if not rg:
+        db.close()
+        raise HTTPException(404, "记录组不存在")
+
+    # 删除不在新列表中的项目
+    db.execute("DELETE FROM run_group_items WHERE run_group_id=? AND project_id NOT IN ({seq})".format(
+        seq=",".join("?"*len(body.project_ids))
+    ), [rgid] + body.project_ids)
+
+    # 添加新项目
+    for pid in body.project_ids:
+        existing = db.execute(
+            "SELECT id FROM run_group_items WHERE run_group_id=? AND project_id=?", (rgid, pid)
+        ).fetchone()
+        if existing: continue
+        proj_name = db.execute("SELECT name FROM projects WHERE id=? AND deleted_at IS NULL", (pid,)).fetchone()
+        proj_name = proj_name["name"] if proj_name else f"项目{pid}"
+        db.execute(
+            "INSERT INTO run_group_items (run_group_id, sim_run_id, project_id, project_name) VALUES (?,0,?,?)",
+            (rgid, pid, proj_name)
+        )
+
+    _link_existing_sim_runs(db, rgid)
+    _refresh_run_group_stats(db, rgid)
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+# --- 四层下钻查询 ---
+
+@app.get("/api/run-groups/{rgid}/items")
+def get_run_group_items(rgid: int):
+    """获取记录组下所有项目结果"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT rgi.*, srn.hit_count, srn.total_days, srn.start_date, srn.end_date "
+        "FROM run_group_items rgi LEFT JOIN sim_runs srn ON rgi.sim_run_id=srn.id AND rgi.sim_run_id > 0 "
+        "WHERE rgi.run_group_id=? ORDER BY rgi.id",
+        (rgid,)
+    ).fetchall()
+    db.close()
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["hit_rate"] = round(d["hit_count"]/d["total_days"]*100, 1) if d["total_days"] else 0
+        items.append(d)
+    return items
+
+
+@app.get("/api/run-groups/{rgid}/results")
+def get_run_group_results(rgid: int):
+    """获取记录组下所有项目的日结果（合并视图）"""
+    db = get_db()
+    items = db.execute(
+        "SELECT sim_run_id FROM run_group_items WHERE run_group_id=? ORDER BY id", (rgid,)
+    ).fetchall()
+    if not items:
+        db.close()
+        return {"items": []}
+
+    sim_run_ids = [i["sim_run_id"] for i in items]
+    placeholders = ",".join("?" * len(sim_run_ids))
+    rows = db.execute(
+        f"SELECT * FROM sim_results WHERE run_id IN ({placeholders}) ORDER BY date, run_id, group_name",
+        sim_run_ids
+    ).fetchall()
+    db.close()
+
+    # 合并为 daily 结构
+    daily = {}
+    for r in rows:
+        dt = r["date"]
+        key = f"{dt}_{r['run_id']}"
+        if key not in daily:
+            daily[key] = {"date": dt, "run_id": r["run_id"], "draw_number": r["draw_number"],
+                          "hit_group": r["hit_group"], "groups": {}}
+        daily[key]["groups"][r["group_name"]] = {
+            "numbers": json.loads(r["numbers_json"]),
+            "count_n": r["count_n"],
+        }
+    return {"items": sorted(daily.values(), key=lambda x: x["date"], reverse=True)}
+
+
+@app.get("/api/run-group-items/{item_id}/grid")
+def get_item_grid(item_id: int, date: str = None):
+    """单个项目的 49 格明细"""
+    db = get_db()
+    item = db.execute("SELECT * FROM run_group_items WHERE id=?", (item_id,)).fetchone()
+    if not item:
+        db.close()
+        raise HTTPException(404, "项目不存在")
+    if item["sim_run_id"] <= 0:
+        db.close()
+        return {"project_name": item["project_name"], "last_date": "", "grid": []}
+
+    value_map = get_count_map_dict(db)
+    run_id = item["sim_run_id"]
+
+    if date:
+        use_date = date
+    else:
+        last = db.execute("SELECT MAX(date) as dt FROM sim_results WHERE run_id=?", (run_id,)).fetchone()
+        use_date = last["dt"] or ""
+
+    if not use_date:
+        db.close()
+        return {"project_name": item["project_name"], "last_date": "", "grid": []}
+
+    # 获取该日所有组
+    groups = db.execute(
+        "SELECT group_name, count_n, numbers_json FROM sim_results WHERE run_id=? AND date=?",
+        (run_id, use_date)
+    ).fetchall()
+
+    grid = {n: 0 for n in range(1, 50)}
+    for g in groups:
+        nums = json.loads(g["numbers_json"])
+        val = value_map.get(g["count_n"], 0)
+        for n in nums:
+            grid[n] = grid.get(n, 0) + val
+
+    grid_list = [{"n": n, "value": grid[n]} for n in range(1, 50)]
+    total = sum(g["value"] for g in grid_list)
+
+    db.close()
+    return {
+        "project_name": item["project_name"],
+        "last_date": use_date,
+        "grid": grid_list,
+        "total": total,
     }
 
 
