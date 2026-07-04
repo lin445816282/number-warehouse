@@ -1069,9 +1069,38 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     counts = {g: 1 for g in GROUPS}
     day_offset = 0  # 已运行天数
 
+    # 生成日期序列
+    sd = date.fromisoformat(start_date)
+    ed = date.fromisoformat(end_date)
+    all_dates = []
+    d = sd
+    while d <= ed:
+        all_dates.append(d.isoformat())
+        d += timedelta(days=1)
+
+    # 加载抽签记录（查整个范围）
+    records = db.execute(
+        "SELECT date, draw_number FROM records WHERE date BETWEEN ? AND ? ORDER BY date",
+        (start_date, end_date)
+    ).fetchall()
+    records_by_date = {}
+    for rec in records:
+        if rec["draw_number"] is not None and rec["draw_number"] != 0:
+            records_by_date[rec["date"]] = rec["draw_number"]
+
+    if not all_dates:
+        raise HTTPException(400, "无效日期范围")
+
     if existing:
         existing_end = existing["end_date"]
+        # 检查是否有待开奖的天需要更新
+        pending_days = []
         if end_date <= existing_end:
+            pending_days = db.execute(
+                "SELECT DISTINCT date FROM sim_results WHERE run_id=? AND hit_group IS NULL AND date BETWEEN ? AND ?",
+                (existing["id"], start_date, end_date)
+            ).fetchall()
+        if not pending_days and end_date <= existing_end:
             return {
                 "ok": True, "run_id": existing["id"], "skipped": True,
                 "total_days": existing["total_days"], "hit_count": existing["hit_count"],
@@ -1079,107 +1108,111 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 "project_id": pid, "project_name": proj_name,
                 "message": f"已有 {existing_end} 前数据，跳过"
             }
-        # 从已有最后一天接续
-        real_start = (date.fromisoformat(existing_end) + timedelta(days=1)).isoformat()
-        # 加载最后一天的状态
-        last_results = db.execute(
-            "SELECT group_name, numbers_json, count_n FROM sim_results "
-            "WHERE run_id=? AND date=? ORDER BY group_name",
-            (existing["id"], existing_end)
-        ).fetchall()
-        if last_results:
-            for r in last_results:
-                groups[r["group_name"]] = json.loads(r["numbers_json"])
-                counts[r["group_name"]] = r["count_n"]
-        day_offset = existing["total_days"]
-        run_id = existing["id"]
-        is_new_run = False
+        # 有pending或需要接续 → 从接入点开始
+        if pending_days:
+            # 重新运行：先删该范围已有结果，从start_date前一天加载状态
+            db.execute("DELETE FROM sim_results WHERE run_id=? AND date >= ?",
+                       (existing["id"], start_date))
+            # 从 start_date 前一天恢复状态
+            prev_date = (date.fromisoformat(start_date) - timedelta(days=1)).isoformat()
+            prev_results = db.execute(
+                "SELECT group_name, numbers_json, count_n FROM sim_results "
+                "WHERE run_id=? AND date=? ORDER BY group_name",
+                (existing["id"], prev_date)
+            ).fetchall()
+            if prev_results:
+                for r in prev_results:
+                    groups[r["group_name"]] = json.loads(r["numbers_json"])
+                    counts[r["group_name"]] = r["count_n"]
+                # 计算到前一天为止的天数
+                prev_day_count = db.execute(
+                    "SELECT COUNT(DISTINCT date) FROM sim_results WHERE run_id=? AND date <= ?",
+                    (existing["id"], prev_date)
+                ).fetchone()[0]
+                day_offset = prev_day_count
+            else:
+                day_offset = 0
+            real_start = start_date
+            run_id = existing["id"]
+            is_new_run = False
+        else:
+            # 从已有最后一天接续
+            real_start_dt = date.fromisoformat(existing_end) + timedelta(days=1)
+            real_start = real_start_dt.isoformat()
+            last_results = db.execute(
+                "SELECT group_name, numbers_json, count_n FROM sim_results "
+                "WHERE run_id=? AND date=? ORDER BY group_name",
+                (existing["id"], existing_end)
+            ).fetchall()
+            if last_results:
+                for r in last_results:
+                    groups[r["group_name"]] = json.loads(r["numbers_json"])
+                    counts[r["group_name"]] = r["count_n"]
+            day_offset = existing["total_days"]
+            run_id = existing["id"]
+            is_new_run = False
     else:
         real_start = start_date
         is_new_run = True
 
-    # 加载实际日期范围的抽签记录
-    records = db.execute(
-        "SELECT date, draw_number FROM records WHERE date BETWEEN ? AND ? ORDER BY date",
-        (real_start, end_date)
-    ).fetchall()
-    if not records:
-        if existing:
-            return {
-                "ok": True, "run_id": run_id, "skipped": True,
-                "total_days": existing["total_days"], "hit_count": existing["hit_count"],
-                "project_id": pid, "project_name": proj_name,
-                "message": f"已有 {existing['end_date']} 前数据，新范围内无抽签数据"
-            }
-        raise HTTPException(400, f"{real_start}~{end_date} 无抽签数据")
+    # 过滤all_dates到real_start之后
+    process_dates = [dt for dt in all_dates if dt >= real_start]
 
-    # 检查空抽签
-    valid = []
-    for rec in records:
-        if rec["draw_number"] is None or rec["draw_number"] == 0:
-            break
-        valid.append(rec)
-    if not valid:
-        raise HTTPException(400, "无有效抽签数据")
-
-    # 创建/获取运行记录
     if is_new_run:
         db.execute(
             "INSERT INTO sim_runs (rule_id, start_date, end_date, total_days, project_id, project_name) VALUES (?,?,?,?,?,?)",
-            (rule_id, valid[0]["date"], valid[-1]["date"], 0, pid, proj_name)
+            (rule_id, process_dates[0] if process_dates else start_date, end_date, 0, pid, proj_name)
         )
         run_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     hit_count = 0
-    current_base = None  # 跟踪当前的底部分组
+    pending_count = 0
+    current_base = None
 
-    for day_idx, rec in enumerate(valid):
-        dt, draw = rec["date"], rec["draw_number"]
+    for day_idx, dt in enumerate(process_dates):
+        draw = records_by_date.get(dt)  # None 表示无抽签 → 待开奖
 
-        # 检查当天是否有分时段分组覆盖
         eff_groups = get_effective_groups(db, pid, dt)
         eff_key = json.dumps(eff_groups, sort_keys=True)
         is_first_day = (day_offset + day_idx == 0)
         skip_rotate = False
         if eff_key != current_base:
-            if is_first_day and existing:
+            if is_first_day and existing and not pending_days:
                 current_base = eff_key
             else:
-                # 底部分组变化，重建到昨天的旋转状态（今天旋转由下面统一执行）
                 groups = eff_groups
                 for _ in range(max(0, day_offset + day_idx - 1)):
                     groups = rotate_left_n(groups, shift)
                 current_base = eff_key
                 if day_offset + day_idx == 0:
-                    skip_rotate = True  # 首日不旋转
+                    skip_rotate = True
 
-        # 左移：day_offset=0 (首日)不移动，之后每次移动
         if not skip_rotate and day_offset + day_idx >= 1:
             groups = rotate_left_n(groups, shift)
 
         hit_group = None
-        for g in GROUPS:
-            if draw in groups[g]:
-                hit_group = g
-                hit_count += 1
-                break
+        if draw is not None:
+            for g in GROUPS:
+                if draw in groups[g]:
+                    hit_group = g
+                    hit_count += 1
+                    break
+        else:
+            pending_count += 1
 
-        # 首日初始化次数
         if day_offset + day_idx == 0:
             counts = {g: 1 for g in GROUPS}
 
-        # === 写入 sim_results：用当天起始的 counts（命中组显示累积次数，次日才重置） ===
         pre_hit = counts.get(hit_group) if hit_group else None
         for g in GROUPS:
             db.execute(
                 "INSERT OR REPLACE INTO sim_results (run_id, date, draw_number, hit_group, group_name, numbers_json, count_n, pre_hit_count_n) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (run_id, dt, draw, hit_group, g,
+                (run_id, dt, draw or 0, hit_group, g,
                  json.dumps(groups[g]), counts[g],
                  pre_hit if g == hit_group else None)
             )
 
-        # === 更新次数供次日使用：命中组重置为1，其余+1 ===
         new_counts = {}
         for g in GROUPS:
             if g == hit_group:
@@ -1188,12 +1221,17 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 new_counts[g] = counts.get(g, 1) + 1
         counts = new_counts
 
-    total_days = day_offset + len(valid)
-    # 更新运行记录
-    db.execute(
-        "UPDATE sim_runs SET end_date=?, total_days=?, hit_count=hit_count+? WHERE id=?",
-        (valid[-1]["date"], total_days, hit_count, run_id)
-    )
+    total_days = day_offset + len(process_dates)
+    if is_new_run or pending_days:
+        db.execute(
+            "UPDATE sim_runs SET end_date=?, total_days=?, hit_count=? WHERE id=?",
+            (process_dates[-1] if process_dates else end_date, total_days, hit_count, run_id)
+        )
+    else:
+        db.execute(
+            "UPDATE sim_runs SET end_date=?, total_days=?, hit_count=hit_count+? WHERE id=?",
+            (process_dates[-1] if process_dates else end_date, total_days, hit_count, run_id)
+        )
     db.commit()
 
     return {
@@ -1201,8 +1239,9 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         "total_days": total_days, "hit_count": db.execute(
             "SELECT hit_count FROM sim_runs WHERE id=?", (run_id,)).fetchone()["hit_count"],
         "start_date": db.execute("SELECT start_date FROM sim_runs WHERE id=?", (run_id,)).fetchone()["start_date"],
-        "end_date": valid[-1]["date"],
-        "new_days": len(valid),
+        "end_date": process_dates[-1] if process_dates else end_date,
+        "new_days": len(process_dates),
+        "pending_count": pending_count,
         "project_id": pid, "project_name": proj_name,
         "continued": not is_new_run
     }

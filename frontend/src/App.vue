@@ -362,9 +362,15 @@
       <div v-if="simResult">
         <div class="sim-subtitle" style="display:flex;justify-content:space-between;align-items:center">
           <span>📊 {{ simResult.run.project_name || '' }} {{ simResult.run.rule_name }}</span>
-          <button class="btn-add-sm" @click="cycleSimDisplay">
-            {{ simShowAll ? '收起' : (simLast30 ? '展开全部' : '近30天') }}
-          </button>
+          <div style="display:flex;gap:6px">
+            <button class="btn-add-sm" v-if="!simShowAll" @click="simShowAll=true;simLast30=false">
+              📖 展开全部
+            </button>
+            <button class="btn-add-sm" v-if="simShowAll" @click="simShowAll=false;simLast30=true"
+                    style="background:#f0f4f8;color:#8899b0">
+              📕 收起
+            </button>
+          </div>
         </div>
         <div class="sim-summary card">
           <span>📅 {{ simResult.run.start_date }} ~ {{ simResult.run.end_date }}</span>
@@ -373,8 +379,9 @@
         <div v-for="day in simDisplayDays" :key="day.date" class="sim-day card">
           <div class="sim-day-head">
             <span class="sim-day-date">{{ day.date }}</span>
-            <span class="sim-day-draw">抽签 <b>{{ day.draw_number }}</b></span>
+            <span class="sim-day-draw">抽签 <b>{{ day.draw_number || '—' }}</b></span>
             <span class="sim-hit-tag" v-if="day.hit_group">{{ day.hit_group }}组命中</span>
+            <span class="sim-hit-tag pending" v-else-if="!day.draw_number">⏳待开奖</span>
             <span class="sim-hit-tag miss" v-else>未命中</span>
           </div>
           <div class="sim-day-grid">
@@ -1179,6 +1186,7 @@ async function runSimulation() {
     const generated = runs.filter(r => !r.skipped)
     const totalHits = runs.reduce((s, r) => s + (r.hit_count||0), 0)
     const totalDays = runs.reduce((s, r) => s + (r.total_days||0), 0)
+    const pendingTotal = runs.reduce((s, r) => s + (r.pending_count||0), 0)
 
     let msg = ''
     if (generated.length) {
@@ -1191,7 +1199,8 @@ async function runSimulation() {
     if (skipped.length) {
       msg += `\n⚠️ ${skipped.length}项目已有数据，跳过`
     }
-    msg += `\n命中 ${totalHits}/${totalDays}`
+    msg += `\n命中 ${totalHits}/${totalDays - pendingTotal}`
+    if (pendingTotal) msg += ` +${pendingTotal}天待开奖`
     $notify(msg)
     runSimDialog.value = false
     simShowAll.value = false
@@ -1470,6 +1479,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   padding: 2px 8px; border-radius: 8px; font-weight: 700;
 }
 .sim-hit-tag.miss { background: #fff0f0; color: #ee0a24; }
+.sim-hit-tag.pending { background: #fff8e1; color: #f59e0b; }
 .sim-day-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
 .sim-gcell {
   background: #f8fafc; border-radius: 8px; padding: 6px; text-align: center;
