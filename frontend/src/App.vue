@@ -94,6 +94,19 @@
           <span class="gs-gnums">{{ g.numbers.join(', ') }}</span>
           <button class="gs-del" @click.stop="delGroup(g.id)">🗑</button>
         </div>
+        <!-- 分时段分组 -->
+        <div class="gs-group-header" style="margin-top:14px">
+          <span>📅 分时段 ({{ periodGroups.length }})</span>
+          <button class="btn-add-sm" @click="openAddPeriod">+</button>
+        </div>
+        <div v-for="pg in periodGroups" :key="pg.id" class="gs-group-row" @click="editPeriod(pg)">
+          <span class="gs-gname">
+            <template v-if="pg.start_time || pg.end_time">🕐 {{ pg.start_time }}~{{ pg.end_time }}</template>
+            <template v-if="pg.start_date">📅 {{ pg.start_date }}~{{ pg.end_date }}</template>
+            <template v-if="!pg.start_date && !pg.start_time">通用</template>
+          </span>
+          <button class="gs-del" @click.stop="delPeriod(pg.id)">🗑</button>
+        </div>
         <!-- 规则管理 -->
         <div class="gs-group-header" style="margin-top:14px">
           <span>左移规则 ({{ rulesByProject[selPid]?.length || 0 }})</span>
@@ -135,6 +148,27 @@
           <div class="form-btns">
             <button class="btn-cancel" @click="showGroupForm=false">取消</button>
             <button class="btn-submit" @click="saveGroup">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 弹窗：新增/编辑分时段 -->
+      <div v-if="showPeriodForm" class="form-overlay" @click.self="showPeriodForm=false">
+        <div class="form-card">
+          <div class="form-title">{{ editingPeriodId ? '编辑分时段' : '新增分时段' }}</div>
+          <label>🕐 起始时间 (HH:MM，留空=不限)</label>
+          <input type="time" v-model="periodForm.start_time" class="form-input" />
+          <label>🕐 结束时间</label>
+          <input type="time" v-model="periodForm.end_time" class="form-input" />
+          <label>📅 起始日期 (可选)</label>
+          <input type="date" v-model="periodForm.start_date" class="form-input" />
+          <label>📅 结束日期 (可选)</label>
+          <input type="date" v-model="periodForm.end_date" class="form-input" />
+          <label>A-L 组数字 (JSON格式，如 {"A":[1,2,3],"B":[4,5],...})</label>
+          <textarea v-model="periodForm.groupsStr" class="form-input" rows="4" placeholder='{"A":[1,2,3],"B":[4,5,6],...}'></textarea>
+          <div class="form-btns">
+            <button class="btn-cancel" @click="showPeriodForm=false">取消</button>
+            <button class="btn-submit" @click="savePeriod">保存</button>
           </div>
         </div>
       </div>
@@ -525,6 +559,12 @@ const showGroupForm = ref(false)
 const editingGid = ref(null)
 const groupForm = ref({ group_name: '', numbersStr: '' })
 
+// 分时段分组表单
+const periodGroups = ref([])
+const showPeriodForm = ref(false)
+const editingPeriodId = ref(null)
+const periodForm = ref({ start_date: '', end_date: '', start_time: '', end_time: '', groupsStr: '' })
+
 // 左移规则表单
 const showSimRuleForm = ref(false)
 const simRuleForm = ref({ shift: 1 })
@@ -570,6 +610,67 @@ async function delGroup(gid) {
   } catch (e) { console.error(e) }
 }
 
+// ===== 分时段分组 =====
+async function loadPeriodGroups() {
+  if (!selPid.value) return
+  try {
+    const res = await fetch(`${API}/projects/${selPid.value}/period-groups`)
+    periodGroups.value = await res.json()
+  } catch (e) { console.error(e) }
+}
+
+function openAddPeriod() {
+  editingPeriodId.value = null
+  periodForm.value = { start_date: '', end_date: '', start_time: '', end_time: '', groupsStr: '' }
+  showPeriodForm.value = true
+}
+
+function editPeriod(pg) {
+  editingPeriodId.value = pg.id
+  periodForm.value = {
+    start_date: pg.start_date || '',
+    end_date: pg.end_date || '',
+    start_time: pg.start_time || '',
+    end_time: pg.end_time || '',
+    groupsStr: JSON.stringify(pg.groups_json)
+  }
+  showPeriodForm.value = true
+}
+
+async function savePeriod() {
+  try {
+    const payload = {
+      project_id: selPid.value,
+      start_date: periodForm.value.start_date,
+      end_date: periodForm.value.end_date,
+      start_time: periodForm.value.start_time,
+      end_time: periodForm.value.end_time,
+      groups_json: periodForm.value.groupsStr
+    }
+    if (editingPeriodId.value) {
+      await fetch(`${API}/period-groups/${editingPeriodId.value}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+    } else {
+      await fetch(`${API}/projects/${selPid.value}/period-groups`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+    }
+    showPeriodForm.value = false
+    loadPeriodGroups()
+  } catch (e) { alert('保存失败: ' + e.message) }
+}
+
+async function delPeriod(pgid) {
+  if (!confirm('确定删除此时段？')) return
+  try {
+    await fetch(`${API}/period-groups/${pgid}`, { method: 'DELETE' })
+    loadPeriodGroups()
+  } catch (e) { console.error(e) }
+}
+
 async function loadProjects() {
   try {
     const res = await fetch(`${API}/projects`)
@@ -585,6 +686,7 @@ function selectProject(pid) {
   selPid.value = pid
   loadGsGroups()
   loadSimRules()
+  loadPeriodGroups()
 }
 
 async function loadGsGroups() {

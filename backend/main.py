@@ -89,6 +89,16 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now','localtime')),
             UNIQUE(project_id, group_name)
         );
+        CREATE TABLE IF NOT EXISTS project_period_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            groups_json TEXT NOT NULL DEFAULT '{}',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
         CREATE TABLE IF NOT EXISTS dev_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -182,6 +192,13 @@ def init_db():
     except Exception: pass
     try:
         db.execute("ALTER TABLE sim_runs ADD COLUMN project_name TEXT DEFAULT ''")
+    except Exception: pass
+    # 分时段表新增时间列
+    try:
+        db.execute("ALTER TABLE project_period_groups ADD COLUMN start_time TEXT DEFAULT ''")
+    except Exception: pass
+    try:
+        db.execute("ALTER TABLE project_period_groups ADD COLUMN end_time TEXT DEFAULT ''")
     except Exception: pass
     # 种子：次数映射值 1-52
     count_values = [0,0,0,25,30,35,40,45,50,55,60,64,72,81,91,102,113,126,140,156,173,191,211,233,257,283,312,343,377,415,456,501,549,603,661,725,795,871,955,1046,1145,1254,1373,1503,1645,1801,1971,2207,2473,2769,3101,3473]
@@ -541,6 +558,24 @@ class GroupUpdate(BaseModel):
     numbers: Optional[list] = None
 
 
+class PeriodGroupIn(BaseModel):
+    project_id: int
+    start_date: str = ""
+    end_date: str = ""
+    start_time: str = ""   # HH:MM，空=不限时段
+    end_time: str = ""     # HH:MM
+    groups_json: str = "{}"
+
+
+class PeriodGroupUpdate(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    groups_json: Optional[str] = None
+    is_active: Optional[int] = None
+
+
 @app.get("/api/projects")
 def list_projects():
     db = get_db()
@@ -663,6 +698,162 @@ def delete_group(gid: int):
     db.commit()
     db.close()
     return {"ok": True}
+
+
+# ==================== 分时段分组 ====================
+
+def get_effective_groups(db, project_id: int, dt: str = None) -> dict:
+    """获取当前生效的分组。优先匹配分时段（时间>日期），否则回落项目默认分组。
+
+    匹配优先级：
+    1. 分时段组别有 start_time/end_time → 检查当前时间是否在范围内
+    2. 分时段组别有 start_date/end_date → 检查当前日期是否在范围内
+    3. 都没有 → 回落项目默认 project_groups
+    4. 如果项目也无默认分组 → 用 BASE_GROUPS
+    """
+    from datetime import datetime as dt_module
+    now = dt_module.now()
+    cur_date = now.strftime("%Y-%m-%d")
+    cur_time = now.strftime("%H:%M")
+
+    # 先查分时段（同时满足日期+时间才命中）
+    rows = db.execute("""
+        SELECT groups_json, start_date, end_date, start_time, end_time
+        FROM project_period_groups
+        WHERE project_id=? AND is_active=1
+        ORDER BY start_time DESC, start_date DESC
+    """, (project_id,)).fetchall()
+
+    for row in rows:
+        sd = row["start_date"] or ""
+        ed = row["end_date"] or ""
+        st = row["start_time"] or ""
+        et = row["end_time"] or ""
+
+        # 日期匹配（空=不限）
+        date_ok = True
+        if sd or ed:
+            if sd and cur_date < sd: date_ok = False
+            if ed and cur_date > ed: date_ok = False
+
+        # 时间匹配（空=不限）
+        time_ok = True
+        if st or et:
+            if st and cur_time < st: time_ok = False
+            if et and cur_time >= et: time_ok = False
+
+        if date_ok and time_ok:
+            return json.loads(row["groups_json"])
+
+    # 项目默认分组
+    proj_groups = db.execute(
+        "SELECT group_name, numbers FROM project_groups WHERE project_id=? AND deleted_at IS NULL ORDER BY group_name",
+        (project_id,)
+    ).fetchall()
+    if proj_groups:
+        return {r["group_name"]: json.loads(r["numbers"]) for r in proj_groups}
+
+    # 全局默认
+    return {g: list(BASE_GROUPS[g]) for g in GROUPS}
+
+
+@app.get("/api/projects/{pid}/period-groups")
+def list_period_groups(pid: int):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM project_period_groups WHERE project_id=? AND is_active=1 ORDER BY start_date",
+        (pid,)
+    ).fetchall()
+    db.close()
+    return [{"id": r["id"], "project_id": r["project_id"], "start_date": r["start_date"],
+             "end_date": r["end_date"], "start_time": r["start_time"], "end_time": r["end_time"],
+             "groups_json": json.loads(r["groups_json"])} for r in rows]
+
+
+@app.post("/api/projects/{pid}/period-groups")
+def create_period_group(pid: int, pg: PeriodGroupIn):
+    db = get_db()
+    if not db.execute("SELECT id FROM projects WHERE id=? AND deleted_at IS NULL", (pid,)).fetchone():
+        db.close()
+        raise HTTPException(404, "项目不存在")
+    db.execute(
+        "INSERT INTO project_period_groups (project_id, start_date, end_date, start_time, end_time, groups_json) VALUES (?,?,?,?,?,?)",
+        (pid, pg.start_date, pg.end_date, pg.start_time, pg.end_time, pg.groups_json)
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM project_period_groups WHERE rowid=last_insert_rowid()").fetchone()
+    db.close()
+    return {"ok": True, "period": {"id": row["id"], "project_id": row["project_id"],
+              "start_date": row["start_date"], "end_date": row["end_date"],
+              "start_time": row["start_time"], "end_time": row["end_time"],
+              "groups_json": json.loads(row["groups_json"])}}
+
+
+@app.put("/api/period-groups/{pgid}")
+def update_period_group(pgid: int, pg: PeriodGroupUpdate):
+    db = get_db()
+    existing = db.execute("SELECT * FROM project_period_groups WHERE id=? AND is_active=1", (pgid,)).fetchone()
+    if not existing:
+        db.close()
+        raise HTTPException(404, "分时段分组不存在")
+    updates = []
+    vals = []
+    if pg.start_date is not None:
+        updates.append("start_date=?"); vals.append(pg.start_date)
+    if pg.end_date is not None:
+        updates.append("end_date=?"); vals.append(pg.end_date)
+    if pg.start_time is not None:
+        updates.append("start_time=?"); vals.append(pg.start_time)
+    if pg.end_time is not None:
+        updates.append("end_time=?"); vals.append(pg.end_time)
+    if pg.groups_json is not None:
+        updates.append("groups_json=?"); vals.append(pg.groups_json)
+    if pg.is_active is not None:
+        updates.append("is_active=?"); vals.append(pg.is_active)
+    if updates:
+        updates.append("updated_at=datetime('now','localtime')")
+        vals.append(pgid)
+        db.execute(f"UPDATE project_period_groups SET {','.join(updates)} WHERE id=?", vals)
+        db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/period-groups/{pgid}")
+def delete_period_group(pgid: int):
+    db = get_db()
+    db.execute("UPDATE project_period_groups SET is_active=0, updated_at=datetime('now','localtime') WHERE id=?", (pgid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/effective-groups")
+def get_project_effective_groups(pid: int):
+    """获取项目当前生效的分组（含分时段匹配结果）"""
+    db = get_db()
+    # 获取默认分组
+    def_groups = db.execute(
+        "SELECT group_name, numbers FROM project_groups WHERE project_id=? AND deleted_at IS NULL ORDER BY group_name",
+        (pid,)
+    ).fetchall()
+    defaults = {r["group_name"]: json.loads(r["numbers"]) for r in def_groups} if def_groups else None
+
+    # 获取当前生效的分时段分组
+    effective = get_effective_groups(db, pid)
+    db.close()
+
+    is_time_period = False
+    if def_groups and effective != defaults:
+        is_time_period = True
+
+    return {
+        "project_id": pid,
+        "effective_groups": effective,
+        "default_groups": defaults or {g: list(BASE_GROUPS[g]) for g in GROUPS},
+        "is_time_period": is_time_period,
+        "current_time": __import__("datetime").datetime.now().strftime("%H:%M"),
+    }
 
 
 # ==================== 开发规则 CRUD ====================
@@ -940,12 +1131,30 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         run_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     hit_count = 0
+    current_base = None  # 跟踪当前的底部分组
 
     for day_idx, rec in enumerate(valid):
         dt, draw = rec["date"], rec["draw_number"]
 
+        # 检查当天是否有分时段分组覆盖
+        eff_groups = get_effective_groups(db, pid, dt)
+        eff_key = json.dumps(eff_groups, sort_keys=True)
+        is_first_day = (day_offset + day_idx == 0)
+        skip_rotate = False
+        if eff_key != current_base:
+            if is_first_day and existing:
+                current_base = eff_key
+            else:
+                # 底部分组变化，重建到昨天的旋转状态（今天旋转由下面统一执行）
+                groups = eff_groups
+                for _ in range(max(0, day_offset + day_idx - 1)):
+                    groups = rotate_left_n(groups, shift)
+                current_base = eff_key
+                if day_offset + day_idx == 0:
+                    skip_rotate = True  # 首日不旋转
+
         # 左移：day_offset=0 (首日)不移动，之后每次移动
-        if day_offset + day_idx >= 1:
+        if not skip_rotate and day_offset + day_idx >= 1:
             groups = rotate_left_n(groups, shift)
 
         hit_group = None
