@@ -507,6 +507,9 @@
       </div>
     </div>
 
+    <!-- Toast 通知 -->
+    <div v-if="toast.show" class="toast" :class="{ error: toast.isError }">{{ toast.msg }}</div>
+
   </div>
 </template>
 
@@ -529,6 +532,16 @@ function $confirm(msg) {
     confirmDialog._resolve = resolve
     confirmDialog.show = true
   })
+}
+
+// Toast 通知（替代原生 alert）
+const toast = reactive({ show: false, msg: '', isError: false, _timer: null })
+function $notify(msg, isError = false) {
+  clearTimeout(toast._timer)
+  toast.msg = msg
+  toast.isError = isError
+  toast.show = true
+  toast._timer = setTimeout(() => { toast.show = false }, 3000)
 }
 const todayStr = new Date().toISOString().slice(0, 10)
 
@@ -1179,13 +1192,13 @@ async function runSimulation() {
       msg += `\n⚠️ ${skipped.length}项目已有数据，跳过`
     }
     msg += `\n命中 ${totalHits}/${totalDays}`
-    alert(msg)
+    $notify(msg)
     runSimDialog.value = false
     simShowAll.value = false
     simLast30.value = true
     if (data.last_run_id) await loadSimRun(data.last_run_id)
     loadSimQuery()
-  } catch (e) { alert(e.message) }
+  } catch (e) { $notify(e.message, true) }
   finally { running.value = false }
 }
 
@@ -1322,6 +1335,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   box-shadow: 0 8px 40px rgba(0,0,0,.15); max-height: calc(100vh - 80px);
   overflow-y: auto; margin: auto;
 }
+/* Toast */
+.toast {
+  position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+  background: #1a2a4a; color: #fff; padding: 12px 20px; border-radius: 10px;
+  font-size: 13px; z-index: 2001; white-space: pre-line; text-align: center;
+  box-shadow: 0 4px 20px rgba(0,0,0,.2); max-width: 90vw; animation: toastIn .3s;
+}
+.toast.error { background: #ee0a24; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(-10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 .form-title { font-size: 17px; font-weight: 700; color: #1a2a4a; margin-bottom: 16px; }
 .form-fields label { display: block; font-size: 12px; color: #8899b0; margin-bottom: 4px; margin-top: 12px; }
 .form-fields label:first-child { margin-top: 0; }
