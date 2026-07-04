@@ -53,7 +53,10 @@
           <div class="form-title">{{ editingId ? '编辑记录' : '新增记录' }}</div>
           <div class="form-fields">
             <label>日期</label>
-            <input type="date" v-model="form.date" class="form-input" />
+            <div class="date-picker-field" @click="openDatePicker(form.date, v => form.date = v, $event)">
+              {{ form.date || '点击选择日期' }}
+              <span class="date-arrow">📅</span>
+            </div>
             <label>日期序号 <span class="form-hint">(自动)</span></label>
             <input type="number" :value="computedDaySeq" class="form-input" disabled />
             <label>抽签数 (1-49)</label>
@@ -86,7 +89,7 @@
 
       <div v-if="selPid" class="gs-groups">
         <div class="gs-group-header">
-          <span>组别 ({{ gsGroups.length }})</span>
+          <span>📋 默认通用组别 ({{ gsGroups.length }})</span>
           <button class="btn-add-sm" @click="openAddGroup">+ 组</button>
         </div>
         <div v-for="g in gsGroups" :key="g.id" class="gs-group-row" @click="editGroup(g)">
@@ -94,17 +97,14 @@
           <span class="gs-gnums">{{ g.numbers.join(', ') }}</span>
           <button class="gs-del" @click.stop="delGroup(g.id)">🗑</button>
         </div>
-        <!-- 分时段分组 -->
-        <div class="gs-group-header" style="margin-top:14px">
-          <span>📅 分时段 ({{ periodGroups.length }})</span>
+        <!-- 分时段组别 -->
+        <div class="gs-group-header" style="margin-top:16px;border-top:1px solid #e8ecf1;padding-top:14px">
+          <span>📅 分时段组别 ({{ periodGroups.length }})</span>
           <button class="btn-add-sm" @click="openAddPeriod">+</button>
         </div>
+        <div class="gs-hint" style="font-size:11px;color:#8899b0;padding:4px 0 8px">优先取分时段组别，未配置时段则用默认通用</div>
         <div v-for="pg in periodGroups" :key="pg.id" class="gs-group-row" @click="editPeriod(pg)">
-          <span class="gs-gname">
-            <template v-if="pg.start_time || pg.end_time">🕐 {{ pg.start_time }}~{{ pg.end_time }}</template>
-            <template v-if="pg.start_date">📅 {{ pg.start_date }}~{{ pg.end_date }}</template>
-            <template v-if="!pg.start_date && !pg.start_time">通用</template>
-          </span>
+          <span class="gs-gname">{{ pg.start_date }} ~ {{ pg.end_date }}</span>
           <button class="gs-del" @click.stop="delPeriod(pg.id)">🗑</button>
         </div>
         <!-- 规则管理 -->
@@ -154,18 +154,25 @@
 
       <!-- 弹窗：新增/编辑分时段 -->
       <div v-if="showPeriodForm" class="form-overlay" @click.self="showPeriodForm=false">
-        <div class="form-card">
+        <div class="form-card" style="max-width:400px">
           <div class="form-title">{{ editingPeriodId ? '编辑分时段' : '新增分时段' }}</div>
-          <label>🕐 起始时间 (HH:MM，留空=不限)</label>
-          <input type="time" v-model="periodForm.start_time" class="form-input" />
-          <label>🕐 结束时间</label>
-          <input type="time" v-model="periodForm.end_time" class="form-input" />
-          <label>📅 起始日期 (可选)</label>
-          <input type="date" v-model="periodForm.start_date" class="form-input" />
-          <label>📅 结束日期 (可选)</label>
-          <input type="date" v-model="periodForm.end_date" class="form-input" />
-          <label>A-L 组数字 (JSON格式，如 {"A":[1,2,3],"B":[4,5],...})</label>
-          <textarea v-model="periodForm.groupsStr" class="form-input" rows="4" placeholder='{"A":[1,2,3],"B":[4,5,6],...}'></textarea>
+          <label>起始日期</label>
+          <div class="date-picker-field" @click="openDatePicker(periodForm.start_date, v => periodForm.start_date = v, $event)">
+            {{ periodForm.start_date || '点击选择日期' }}
+            <span class="date-arrow">📅</span>
+          </div>
+          <label>结束日期</label>
+          <div class="date-picker-field" @click="openDatePicker(periodForm.end_date, v => periodForm.end_date = v, $event)">
+            {{ periodForm.end_date || '点击选择日期' }}
+            <span class="date-arrow">📅</span>
+          </div>
+          <div class="gs-group-header" style="margin-top:8px">
+            <span>A-L 组数字</span>
+          </div>
+          <div v-for="g in gsGroups" :key="g.id" class="gs-group-row" style="cursor:default">
+            <span class="gs-gname">{{ g.group_name }}组</span>
+            <input v-model="periodNums[g.group_name]" class="form-input" style="flex:1;font-size:12px;padding:6px" :placeholder="g.numbers.join(',')" />
+          </div>
           <div class="form-btns">
             <button class="btn-cancel" @click="showPeriodForm=false">取消</button>
             <button class="btn-submit" @click="savePeriod">保存</button>
@@ -278,19 +285,15 @@
             <option :value="null">全部项目</option>
             <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
-          <select v-model="simQStartYear" @change="syncSimQDates" class="form-input" style="flex:0.8;min-width:55px;font-size:11px">
-            <option v-for="y in yearRange" :key="y" :value="y">{{y}}年</option>
-          </select>
-          <select v-model="simQStartMonth" @change="syncSimQDates" class="form-input" style="flex:0.6;min-width:42px;font-size:11px">
-            <option v-for="m in 12" :key="m" :value="m">{{m}}月</option>
-          </select>
+          <div class="date-picker-field date-picker-sm" @click="openDatePicker(simQStart, v => simQStart = v, $event)" style="flex:1">
+            {{ simQStart ? simQStart : '起始日' }}
+            <span class="date-arrow">📅</span>
+          </div>
           <span class="sim-hint">~</span>
-          <select v-model="simQEndYear" @change="syncSimQDates" class="form-input" style="flex:0.8;min-width:55px;font-size:11px">
-            <option v-for="y in yearRange" :key="y" :value="y">{{y}}年</option>
-          </select>
-          <select v-model="simQEndMonth" @change="syncSimQDates" class="form-input" style="flex:0.6;min-width:42px;font-size:11px">
-            <option v-for="m in 12" :key="m" :value="m">{{m}}月</option>
-          </select>
+          <div class="date-picker-field date-picker-sm" @click="openDatePicker(simQEnd, v => simQEnd = v, $event)" style="flex:1">
+            {{ simQEnd ? simQEnd : '结束日' }}
+            <span class="date-arrow">📅</span>
+          </div>
           <button class="btn-add-sm" @click="simQPage=1;loadSimQuery()">🔍 查询</button>
         </div>
       </div>
@@ -299,9 +302,15 @@
       <div v-if="runSimDialog" class="sim-params card">
         <div class="sim-subtitle-sm">📅 日期范围</div>
         <div class="sim-param-row">
-          <input type="date" v-model="simStart" class="form-input" style="flex:1" />
-          <span class="sim-hint">~</span>
-          <input type="date" v-model="simEnd" class="form-input" style="flex:1" />
+          <div class="date-picker-field" @click="openDatePicker(simStart, v => simStart = v, $event)" style="flex:1">
+            {{ simStart || '开始日期' }}
+            <span class="date-arrow">📅</span>
+          </div>
+          <span class="sim-hint" style="margin:0 6px">~</span>
+          <div class="date-picker-field" @click="openDatePicker(simEnd, v => simEnd = v, $event)" style="flex:1">
+            {{ simEnd || '结束日期' }}
+            <span class="date-arrow">📅</span>
+          </div>
         </div>
         <div class="sim-subtitle-sm">📦 项目 & 规则</div>
         <div v-for="p in projects" :key="p.id" class="sim-proj-row"
@@ -395,19 +404,15 @@
       </div>
       <div class="sim-query card">
         <div class="sim-param-row">
-          <select v-model="anStartYear" @change="syncAnDates" class="form-input" style="flex:1;min-width:55px;font-size:11px">
-            <option v-for="y in yearRange" :key="y" :value="y">{{y}}年</option>
-          </select>
-          <select v-model="anStartMonth" @change="syncAnDates" class="form-input" style="flex:0.8;min-width:42px;font-size:11px">
-            <option v-for="m in 12" :key="m" :value="m">{{m}}月</option>
-          </select>
+          <div class="date-picker-field date-picker-sm" @click="openDatePicker(anStart, v => anStart = v, $event)" style="flex:1">
+            {{ anStart ? anStart : '起始日' }}
+            <span class="date-arrow">📅</span>
+          </div>
           <span class="sim-hint">~</span>
-          <select v-model="anEndYear" @change="syncAnDates" class="form-input" style="flex:1;min-width:55px;font-size:11px">
-            <option v-for="y in yearRange" :key="y" :value="y">{{y}}年</option>
-          </select>
-          <select v-model="anEndMonth" @change="syncAnDates" class="form-input" style="flex:0.8;min-width:42px;font-size:11px">
-            <option v-for="m in 12" :key="m" :value="m">{{m}}月</option>
-          </select>
+          <div class="date-picker-field date-picker-sm" @click="openDatePicker(anEnd, v => anEnd = v, $event)" style="flex:1">
+            {{ anEnd ? anEnd : '结束日' }}
+            <span class="date-arrow">📅</span>
+          </div>
           <button class="btn-add-sm" @click="anPage=1;loadAnalysis()">🔍 查询</button>
         </div>
         <div class="sim-param-row">
@@ -458,6 +463,50 @@
       </div>
     </div>
 
+    <!-- 日期选择器浮层（全局） -->
+    <div v-if="showDatePicker" class="cal-dropdown" :style="calStyle" @click.self="cancelDatePicker">
+      <div class="cal-body">
+        <div class="cal-header">
+          <button class="btn-cancel" @click="cancelDatePicker">取消</button>
+          <span class="cal-title">选择日期</span>
+          <button class="btn-submit" @click="confirmDatePicker">确定</button>
+        </div>
+        <div class="cal-ym">
+          <select v-model.number="pickerYear" class="cal-select">
+            <option v-for="y in pickerYears" :key="y" :value="y">{{ y }}年</option>
+          </select>
+          <select v-model.number="pickerMonth" class="cal-select">
+            <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
+          </select>
+        </div>
+        <div class="cal-weekdays">
+          <span v-for="w in weekDays" :key="w">{{ w }}</span>
+        </div>
+        <div class="cal-grid">
+          <div v-for="(d, i) in calDays" :key="i"
+            :class="['cal-day', {
+              empty: !d,
+              active: d === pickerDay,
+              today: d === todayDay && pickerYear === todayYear && pickerMonth === todayMonth
+            }]"
+            @click="d && (pickerDay = d)">
+            {{ d || '' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <div v-if="confirmDialog.show" class="form-overlay" @click.self="confirmDialog.cancel()">
+      <div class="form-card" style="max-width:300px;text-align:center">
+        <div style="font-size:15px;padding:16px 0 8px;color:#1a2a4a">{{ confirmDialog.msg }}</div>
+        <div class="form-btns">
+          <button class="btn-cancel" @click="confirmDialog.cancel()">取消</button>
+          <button class="btn-submit" style="background:#ee0a24" @click="confirmDialog.ok()">确定</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -465,6 +514,22 @@
 import { ref, reactive, computed } from 'vue'
 
 const API = '/number-warehouse/api'
+
+// 自定义确认弹窗（平板兼容）
+const confirmDialog = reactive({
+  show: false,
+  msg: '',
+  _resolve: null,
+  ok() { this.show = false; if (this._resolve) this._resolve(true) },
+  cancel() { this.show = false; if (this._resolve) this._resolve(false) },
+})
+function $confirm(msg) {
+  return new Promise(resolve => {
+    confirmDialog.msg = msg
+    confirmDialog._resolve = resolve
+    confirmDialog.show = true
+  })
+}
 const todayStr = new Date().toISOString().slice(0, 10)
 
 const view = ref('records')
@@ -541,7 +606,7 @@ async function doSave() {
 }
 
 async function doDelete(id) {
-  if (!confirm('确定删除此记录？')) return
+  const ok = await $confirm('确定删除此记录？'); if (!ok) return
   try {
     await fetch(`${API}/records/${id}`, { method: 'DELETE' })
     loadRecords()
@@ -563,7 +628,75 @@ const groupForm = ref({ group_name: '', numbersStr: '' })
 const periodGroups = ref([])
 const showPeriodForm = ref(false)
 const editingPeriodId = ref(null)
-const periodForm = ref({ start_date: '', end_date: '', start_time: '', end_time: '', groupsStr: '' })
+const periodForm = ref({ start_date: '', end_date: '' })
+const periodNums = reactive({})  // {A:"1,2,3", B:"4,5,6", ...}
+
+// 日期选择器
+const showDatePicker = ref(false)
+const datePickerSetter = ref(null)  // (val: string) => void
+const pickerYear = ref(2024)
+const pickerMonth = ref(1)
+const pickerDay = ref(1)
+const pickerYears = Array.from({length: 21}, (_, i) => 2020 + i)
+const calStyle = ref({})  // { top, left, width } 动态定位
+
+// 今天
+const now = new Date()
+const todayYear = now.getFullYear()
+const todayMonth = now.getMonth() + 1
+const todayDay = now.getDate()
+
+const weekDays = ['日', '一', '二', '三', '四', '五', '六']
+
+const calDays = computed(() => {
+  const firstDay = new Date(pickerYear.value, pickerMonth.value - 1, 1).getDay()
+  const daysInMonth = new Date(pickerYear.value, pickerMonth.value, 0).getDate()
+  const cells = []
+  for (let i = 0; i < firstDay; i++) cells.push(null)
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d)
+  return cells
+})
+
+function openDatePicker(curVal, setter, event) {
+  datePickerSetter.value = setter
+  // 定位：获取触发元素的屏幕位置
+  const trigger = event.currentTarget || event.target.closest('.date-picker-field')
+  if (trigger) {
+    const rect = trigger.getBoundingClientRect()
+    calStyle.value = {
+      position: 'fixed',
+      top: rect.bottom + 4 + 'px',
+      left: '0',
+      right: '0',
+      width: '100%',
+      maxWidth: '480px',
+      margin: '0 auto',
+    }
+  }
+  if (curVal && /^\d{4}-\d{2}-\d{2}$/.test(curVal)) {
+    const [y, m, d] = curVal.split('-').map(Number)
+    pickerYear.value = y
+    pickerMonth.value = m
+    pickerDay.value = d
+  } else {
+    pickerYear.value = todayYear
+    pickerMonth.value = todayMonth
+    pickerDay.value = todayDay
+  }
+  showDatePicker.value = true
+}
+
+function confirmDatePicker() {
+  const mm = String(pickerMonth.value).padStart(2, '0')
+  const dd = String(pickerDay.value).padStart(2, '0')
+  const dateStr = `${pickerYear.value}-${mm}-${dd}`
+  datePickerSetter.value(dateStr)
+  showDatePicker.value = false
+}
+
+function cancelDatePicker() {
+  showDatePicker.value = false
+}
 
 // 左移规则表单
 const showSimRuleForm = ref(false)
@@ -595,7 +728,7 @@ async function saveSimRule() {
 }
 
 async function delSimRule(rid) {
-  if (!confirm('确定删除此左移规则？')) return
+  const ok = await $confirm('确定删除此左移规则？'); if (!ok) return
   try {
     await fetch(`${API}/sim/rules/${rid}`, { method: 'DELETE' })
     loadSimRules()
@@ -603,7 +736,7 @@ async function delSimRule(rid) {
 }
 
 async function delGroup(gid) {
-  if (!confirm('确定删除此组？')) return
+  const ok = await $confirm('确定删除此组？'); if (!ok) return
   try {
     await fetch(`${API}/groups/${gid}`, { method: 'DELETE' })
     loadGsGroups()
@@ -621,41 +754,39 @@ async function loadPeriodGroups() {
 
 function openAddPeriod() {
   editingPeriodId.value = null
-  periodForm.value = { start_date: '', end_date: '', start_time: '', end_time: '', groupsStr: '' }
+  periodForm.value = { start_date: '', end_date: '' }
+  for (const k of Object.keys(periodNums)) delete periodNums[k]
   showPeriodForm.value = true
 }
 
 function editPeriod(pg) {
   editingPeriodId.value = pg.id
-  periodForm.value = {
-    start_date: pg.start_date || '',
-    end_date: pg.end_date || '',
-    start_time: pg.start_time || '',
-    end_time: pg.end_time || '',
-    groupsStr: JSON.stringify(pg.groups_json)
-  }
+  periodForm.value = { start_date: pg.start_date, end_date: pg.end_date }
+  for (const k of Object.keys(periodNums)) delete periodNums[k]
+  const gj = pg.groups_json || {}
+  for (const [g, nums] of Object.entries(gj)) { periodNums[g] = nums.join(',') }
   showPeriodForm.value = true
 }
 
 async function savePeriod() {
   try {
-    const payload = {
+    const groupsObj = {}
+    for (const [g, ns] of Object.entries(periodNums)) {
+      if (ns && ns.trim()) groupsObj[g] = ns.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
+    }
+    const p = {
       project_id: selPid.value,
       start_date: periodForm.value.start_date,
       end_date: periodForm.value.end_date,
-      start_time: periodForm.value.start_time,
-      end_time: periodForm.value.end_time,
-      groups_json: periodForm.value.groupsStr
+      groups_json: JSON.stringify(groupsObj)
     }
     if (editingPeriodId.value) {
       await fetch(`${API}/period-groups/${editingPeriodId.value}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p)
       })
     } else {
       await fetch(`${API}/projects/${selPid.value}/period-groups`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p)
       })
     }
     showPeriodForm.value = false
@@ -664,7 +795,7 @@ async function savePeriod() {
 }
 
 async function delPeriod(pgid) {
-  if (!confirm('确定删除此时段？')) return
+  const ok = await $confirm('确定删除此时段？'); if (!ok) return
   try {
     await fetch(`${API}/period-groups/${pgid}`, { method: 'DELETE' })
     loadPeriodGroups()
@@ -728,7 +859,8 @@ async function saveProject() {
 }
 
 async function delProject() {
-  if (!confirm('确定删除此项目？(组也将被删除)')) return
+  const ok = await $confirm('确定删除此项目？组也将被删除')
+  if (!ok) return
   try {
     await fetch(`${API}/projects/${selPid.value}`, { method: 'DELETE' })
     selPid.value = null
@@ -835,7 +967,7 @@ async function toggleActive(r) {
 }
 
 async function delRule(id) {
-  if (!confirm('确定删除此规则？')) return
+  const ok = await $confirm('确定删除此规则？'); if (!ok) return
   try {
     const res = await fetch(`${API}/dev-rules/${id}`, { method: 'DELETE' })
     if (!res.ok) throw new Error((await res.json()).detail || '删除失败')
@@ -879,7 +1011,7 @@ async function saveMapping() {
 }
 
 async function delMapping() {
-  if (!confirm(`确定删除次数 ${editingMapN.value} 的映射？`)) return
+  const ok = await $confirm(`确定删除次数 ${editingMapN.value} 的映射？`); if (!ok) return
   try {
     await fetch(`${API}/mapping/${editingMapN.value}`, { method: 'DELETE' })
     mapCountN.value = null
@@ -905,16 +1037,8 @@ const simEnd = ref(todayStr)
 
 // 查询参数
 const simQProject = ref(null)
-const simQStartYear = ref(2026)
-const simQStartMonth = ref(6)
-const simQEndYear = ref(new Date().getFullYear())
-const simQEndMonth = ref(new Date().getMonth() + 1)
-const simQStart = computed(() => `${simQStartYear.value}-${String(simQStartMonth.value).padStart(2,'0')}-01`)
-const simQEnd = computed(() => {
-  const ld = new Date(simQEndYear.value, simQEndMonth.value, 0).getDate()
-  return `${simQEndYear.value}-${String(simQEndMonth.value).padStart(2,'0')}-${String(ld).padStart(2,'0')}`
-})
-function syncSimQDates() {}  // no-op, computed auto-syncs
+const simQStart = ref('2026-01-01')
+const simQEnd = ref(todayStr)
 const simQPage = ref(1)
 const simQItems = ref([])
 const simQTotal = ref(0)
@@ -1076,7 +1200,7 @@ async function loadSimRun(runId) {
 }
 
 async function delSimRun(runId) {
-  if (!confirm('确定删除？')) return
+  const ok = await $confirm('确定删除？'); if (!ok) return
   try {
     await fetch(`${API}/sim/runs/${runId}`, { method: 'DELETE' })
     if (simRunId.value === runId) { simRunId.value = null; simResult.value = null }
@@ -1085,21 +1209,8 @@ async function delSimRun(runId) {
 }
 
 // ===== 数据分析 =====
-const anStartYear = ref(2020)
-const anStartMonth = ref(3)
-const anEndYear = ref(new Date().getFullYear())
-const anEndMonth = ref(new Date().getMonth() + 1)
-const anStart = computed(() => `${anStartYear.value}-${String(anStartMonth.value).padStart(2,'0')}-01`)
-const anEnd = computed(() => {
-  const ld = new Date(anEndYear.value, anEndMonth.value, 0).getDate()
-  return `${anEndYear.value}-${String(anEndMonth.value).padStart(2,'0')}-${String(ld).padStart(2,'0')}`
-})
-const yearRange = computed(() => {
-  const ys = []
-  for (let y = 2020; y <= new Date().getFullYear(); y++) ys.push(y)
-  return ys
-})
-function syncAnDates() {}  // no-op, computed auto-syncs
+const anStart = ref('2020-03-01')
+const anEnd = ref(todayStr)
 const anProject = ref(null)
 const anPage = ref(1)
 const anPages = ref(1)
@@ -1107,7 +1218,7 @@ const anItems = ref([])
 const anCumulative = ref(null)
 
 async function clearAnalysis() {
-  if (!confirm('确定清空分析数据？（不影响原始数据记录）')) return
+  const ok = await $confirm('确定清空分析数据？（不影响原始数据记录）'); if (!ok) return
   try {
     await fetch(`${API}/analysis/clear`, { method: 'DELETE' })
     anItems.value = []
@@ -1203,11 +1314,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 /* 弹窗 */
 .form-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: safe center; justify-content: center;
+  padding: 40px 0; overflow-y: auto;
 }
 .form-card {
   width: 300px; background: #fff; border-radius: 16px; padding: 24px 20px 20px;
-  box-shadow: 0 8px 40px rgba(0,0,0,.15);
+  box-shadow: 0 8px 40px rgba(0,0,0,.15); max-height: calc(100vh - 80px);
+  overflow-y: auto; margin: auto;
 }
 .form-title { font-size: 17px; font-weight: 700; color: #1a2a4a; margin-bottom: 16px; }
 .form-fields label { display: block; font-size: 12px; color: #8899b0; margin-bottom: 4px; margin-top: 12px; }
@@ -1256,6 +1369,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .btn-del-proj {
   flex: 1; padding: 10px; border-radius: 10px; border: none; font-size: 13px;
   font-weight: 600; cursor: pointer; background: #f0f4f8; color: #1a2a4a;
+  min-height: 44px; /* 平板友好触摸区 */
 }
 .btn-del-proj.danger { background: #fff0f0; color: #ee0a24; }
 
@@ -1409,4 +1523,64 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .m-arrow { color: #8899b0; font-size: 10px; }
 .m-value { color: #4da6ff; font-weight: 600; }
 .mapping-add-row { display: flex; gap: 8px; align-items: center; }
+
+/* ===== 日历选择器 ===== */
+.date-picker-field {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 12px; border: 1px solid #dde3ea; border-radius: 8px;
+  background: #fff; font-size: 14px; color: #1a2a4a; cursor: pointer;
+  min-height: 40px;
+}
+.date-picker-field:active { background: #f0f4f8; }
+.date-picker-sm { padding: 6px 8px; font-size: 11px; min-height: 32px; border-radius: 6px; }
+.date-arrow { font-size: 16px; color: #8899b0; }
+.date-picker-overlay { display: none; }  /* 旧样式废弃 */
+.cal-dropdown {
+  position: fixed; z-index: 2000;
+  /* top/left/width 由 JS calStyle 动态设置 */
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.18);
+  overflow: hidden;
+}
+.cal-body {
+  padding-bottom: 12px;
+}
+@keyframes dp-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.cal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid #eef1f5;
+}
+.cal-title { font-size: 16px; font-weight: 700; color: #1a2a4a; }
+.cal-ym {
+  display: flex; gap: 10px; padding: 14px 16px 10px;
+}
+.cal-select {
+  flex: 1; padding: 8px 10px; border: 1px solid #dde3ea; border-radius: 8px;
+  font-size: 15px; color: #1a2a4a; background: #f8fafc; appearance: auto;
+  text-align: center;
+}
+.cal-weekdays {
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  padding: 0 16px; margin-bottom: 4px;
+}
+.cal-weekdays span {
+  text-align: center; font-size: 12px; font-weight: 600;
+  color: #8899b0; padding: 8px 0;
+}
+.cal-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  padding: 0 16px; gap: 2px;
+}
+.cal-day {
+  text-align: center; padding: 10px 0; font-size: 15px; color: #1a2a4a;
+  border-radius: 8px; cursor: pointer; transition: all .12s;
+}
+.cal-day.empty { cursor: default; }
+.cal-day:active:not(.empty) { background: #f0f4f8; }
+.cal-day.today { color: #4da6ff; font-weight: 600; }
+.cal-day.active {
+  background: #4da6ff; color: #fff; font-weight: 700;
+}
+.cal-day.today.active { background: #4da6ff; color: #fff; }
 </style>
