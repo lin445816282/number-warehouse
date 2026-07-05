@@ -2,7 +2,7 @@
 次数映射与数字仓库轮换系统 — FastAPI 后端
 """
 import os, json, copy
-from datetime import date, timedelta
+from datetime import date as dt_date, timedelta
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -13,7 +13,7 @@ import sqlite3
 app = FastAPI(title="数字仓库轮换系统")
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "warehouse.db")
 
-BASE_DATE = date(2026, 1, 1)  # 基准日
+BASE_DATE = dt_date(2026, 1, 1)  # 基准日
 GROUPS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
 
 BASE_GROUPS = {
@@ -270,7 +270,7 @@ def set_config(db, key: str, value: str):
 
 # ==================== 核心算法 ====================
 
-def days_since_base(target_date: date) -> int:
+def days_since_base(target_date: dt_date) -> int:
     return (target_date - BASE_DATE).days
 
 
@@ -306,7 +306,7 @@ def rotate_right_shift(prev_groups: dict) -> dict:
     return new_groups
 
 
-def get_groups_for_date(target_date: date, db) -> dict:
+def get_groups_for_date(target_date: dt_date, db) -> dict:
     """计算指定日期的数字仓库（组→数字列表）"""
     days = days_since_base(target_date)
     if days < 0:
@@ -334,7 +334,7 @@ def apply_mapping(n: int, mapping_config: list) -> int:
     return 0
 
 
-def compute_snapshot(target_date: date, draw_number: int, db) -> dict:
+def compute_snapshot(target_date: dt_date, draw_number: int, db) -> dict:
     """计算完整快照：组→数字+次数+映射值"""
     groups = get_groups_for_date(target_date, db)
     mapping_config = json.loads(get_config(db, "mapping") or "[]")
@@ -396,7 +396,7 @@ class DrawRequest(BaseModel):
 
 @app.post("/api/draw")
 def draw(req: DrawRequest):
-    target = date.fromisoformat(req.date)
+    target = dt_date.fromisoformat(req.date)
     if target < BASE_DATE:
         raise HTTPException(400, "日期不能早于2026-01-01")
     if req.number < 1 or req.number > 49:
@@ -445,7 +445,7 @@ def get_snapshot(date: str = Query(...)):
 
 @app.get("/api/snapshot/today")
 def get_today():
-    today_str = date.today().isoformat()
+    today_str = dt_date.today().isoformat()
     db = get_db()
     row = db.execute("SELECT * FROM snapshots WHERE date=?", (today_str,)).fetchone()
     if row:
@@ -484,9 +484,9 @@ class RecordUpdate(BaseModel):
     draw_number: Optional[int] = None
 
 
-def calc_day_seq(d: date) -> int:
+def calc_day_seq(d: dt_date) -> int:
     """计算日期序号：每年1月1日=1，逐日+1"""
-    year_start = date(d.year, 1, 1)
+    year_start = dt_date(d.year, 1, 1)
     return (d - year_start).days + 1
 
 
@@ -520,7 +520,7 @@ def list_records(page: int = 1, page_size: int = 30, year: str = ""):
 
 @app.post("/api/records")
 def create_record(r: RecordIn):
-    target = date.fromisoformat(r.date)
+    target = dt_date.fromisoformat(r.date)
     day_seq = calc_day_seq(target)
     if r.draw_number < 1 or r.draw_number > 49:
         raise HTTPException(400, "抽签数字需在1-49之间")
@@ -556,7 +556,7 @@ def update_record(rid: int, r: RecordUpdate):
     if new_draw < 1 or new_draw > 49:
         db.close()
         raise HTTPException(400, "抽签数字需在1-49之间")
-    day_seq = calc_day_seq(date.fromisoformat(new_date))
+    day_seq = calc_day_seq(dt_date.fromisoformat(new_date))
     db.execute(
         "UPDATE records SET date=?, day_seq=?, draw_number=?, updated_at=datetime('now','localtime') WHERE id=?",
         (new_date, day_seq, new_draw, rid)
@@ -1121,8 +1121,8 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     reset_tomorrow = set()  # 昨天命中的组，今天重置为1
 
     # 生成日期序列
-    sd = date.fromisoformat(start_date)
-    ed = date.fromisoformat(end_date)
+    sd = dt_date.fromisoformat(start_date)
+    ed = dt_date.fromisoformat(end_date)
     all_dates = []
     d = sd
     while d <= ed:
@@ -1142,10 +1142,10 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     # === 严格限制：end_date = 最新抽签日期 + 1天（只允许一天待开） ===
     if records_by_date:
         max_record_date = max(records_by_date.keys())
-        max_allowed = (date.fromisoformat(max_record_date) + timedelta(days=1)).isoformat()
+        max_allowed = (dt_date.fromisoformat(max_record_date) + timedelta(days=1)).isoformat()
         if max_allowed < end_date:
             end_date = max_allowed
-            ed = date.fromisoformat(end_date)
+            ed = dt_date.fromisoformat(end_date)
             all_dates = []
             d = sd
             while d <= ed:
@@ -1154,7 +1154,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
     elif existing:
         # 完全没有新记录→保持已有范围，不扩展
         end_date = existing["end_date"]
-        ed = date.fromisoformat(end_date)
+        ed = dt_date.fromisoformat(end_date)
         all_dates = []
         d = sd
         while d <= ed:
@@ -1187,7 +1187,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
             db.execute("DELETE FROM sim_results WHERE run_id=? AND date >= ?",
                        (existing["id"], start_date))
             # 从 start_date 前一天恢复状态
-            prev_date = (date.fromisoformat(start_date) - timedelta(days=1)).isoformat()
+            prev_date = (dt_date.fromisoformat(start_date) - timedelta(days=1)).isoformat()
             prev_results = db.execute(
                 "SELECT group_name, numbers_json, count_n FROM sim_results "
                 "WHERE run_id=? AND date=? ORDER BY group_name",
@@ -1220,7 +1220,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
             is_new_run = False
         else:
             # 从已有最后一天接续
-            real_start_dt = date.fromisoformat(existing_end) + timedelta(days=1)
+            real_start_dt = dt_date.fromisoformat(existing_end) + timedelta(days=1)
             real_start = real_start_dt.isoformat()
             last_results = db.execute(
                 "SELECT group_name, numbers_json, count_n FROM sim_results "
@@ -2344,13 +2344,13 @@ def get_scope_daily(
     collection_id: Optional[int] = Query(None),
     summary_id: Optional[int] = Query(None),
     run_group_id: Optional[int] = Query(None),
-    date: str = None,
+    date: Optional[str] = Query(None),
     page: int = 1,
     page_size: int = 30,
 ):
     """按范围取单日盈亏明细：日期/项目/抽签/排位/对应值/累计/结果"""
     if not date:
-        date = date.today().isoformat()
+        date = dt_date.today().isoformat()
     db = get_db()
     # 解析范围→project_ids
     if run_group_id:
@@ -2394,16 +2394,14 @@ def get_scope_daily(
         pids + [date, page_size, offset]
     ).fetchall()
 
-    # 预加载本页需要用到的 sim_results（按 run_id + date 批量取）
-    run_ids = list(set(run_by_pid.values()))
+    # 预加载本页需要用到的 sim_results（按 run_id + date 批量取，仅用于排位计算）
     items = []
     for r in daily_rows:
         pid = r["project_id"]
         rid = run_by_pid.get(pid)
         dt = r["date"]
         draw = r["draw_number"]
-        cumulative = r["cumulative_sum"]
-        # 构建 49 格
+        # 构建 49 格（仅用于排位）
         grid = {n: 0 for n in range(1, 50)}
         if rid:
             groups = db.execute(
@@ -2415,30 +2413,43 @@ def get_scope_daily(
                 val = value_map.get(g["count_n"], 0)
                 for n in nums:
                     grid[n] = grid.get(n, 0) + val
-        # 排位 + 对应值
+        # 排位：抽签数在 49 格中的值排名
         draw_val = grid.get(draw, 0) if draw else 0
         rank = None
-        if draw and grid:
+        if draw and grid and draw_val > 0:
             vals = sorted(set(v for v in grid.values() if v > 0), reverse=True)
             if draw_val in vals:
                 rank = vals.index(draw_val) + 1
-        result = draw_val * 47 - cumulative if draw else None
         items.append({
             "date": dt,
             "project_id": pid,
             "project_name": r["project_name"],
             "draw": draw,
             "rank": rank,
-            "draw_value": draw_val,
-            "cumulative": cumulative,
-            "result": result,
+            "draw_value": r["value"],       # DB 已存的命中值
+            "cumulative": r["cumulative_sum"],  # 累计净收益
+            "result": r["result"],           # 当日净收益（DB 已算好）
         })
     db.close()
+    # 计算当前范围的汇总（全量，不受分页影响）
+    agg = {"total_result": 0, "total_value": 0, "project_count": 0}
+    if pids:
+        agg_db = get_db()
+        agg_row = agg_db.execute(
+            f"SELECT COUNT(*) as cnt, SUM(value) as tv, SUM(result) as tr FROM analysis_daily WHERE project_id IN ({pids_sql}) AND date = ?",
+            pids + [date]
+        ).fetchone()
+        if agg_row:
+            agg["project_count"] = agg_row["cnt"] or 0
+            agg["total_value"] = agg_row["tv"] or 0
+            agg["total_result"] = agg_row["tr"] or 0
+        agg_db.close()
     return {
         "items": items,
         "total": total,
         "page": page,
         "total_pages": max(1, (total + page_size - 1) // page_size),
+        "summary": agg,
     }
 
 

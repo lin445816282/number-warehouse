@@ -454,6 +454,13 @@
             <th>日期</th><th>项目</th><th>抽签</th><th>排位</th><th>对应值</th><th>累计</th><th>结果</th>
           </tr></thead>
           <tbody>
+            <tr v-if="pfSummary" class="pf-summary">
+              <td colspan="2" style="font-weight:700">📊 合计 ({{ pfSummary.project_count }}项)</td>
+              <td>-</td><td>-</td>
+              <td class="pf-num" style="font-weight:700">{{ pfSummary.total_value.toLocaleString() }}</td>
+              <td>-</td>
+              <td class="pf-result" :class="{neg:pfSummary.total_result<0,pos:pfSummary.total_result>=0}" style="font-weight:700">{{ pfSummary.total_result.toLocaleString() }}</td>
+            </tr>
             <tr v-for="it in pfItems" :key="it.date+it.project_id">
               <td>{{ it.date }}</td>
               <td>{{ it.project_name }}</td>
@@ -2142,7 +2149,7 @@ function deselectAllProjects() {
   simProjectRules.value = {}
 }
 
-// 盈亏 — 单日 (v0704tn)
+// 盈亏 — 单日 (v0704to)
 const pfL3 = ref('all'), pfL2 = ref(''), pfL1 = ref('')
 const pfCID = computed(() => pfL3.value !== 'all')
 const pfSID = computed(() => pfCID.value && pfL2.value !== '')
@@ -2150,6 +2157,7 @@ const pfSummaries = ref([]), pfRunGroups = ref([])
 const pfDate = ref(todayStr)
 const pfPage = ref(1), pfPages = ref(1)
 const pfItems = ref([])
+const pfSummary = ref(null)
 const pfSearched = ref(false)
 
 async function loadProfit() {
@@ -2161,7 +2169,7 @@ async function loadProfit() {
   try {
     const res = await fetch(`${API}/scope/daily?${params}`)
     const data = await res.json()
-    pfItems.value = data.items; pfPages.value = data.total_pages; pfPage.value = data.page
+    pfItems.value = data.items; pfPages.value = data.total_pages; pfPage.value = data.page; pfSummary.value = data.summary || null
   } catch (e) { console.error(e) }
 }
 async function onPfL3Change() {
@@ -2579,6 +2587,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .scope-rule-tag { font-size:11px;background:#eef3ff;color:#4da6ff;padding:2px 8px;border-radius:6px }
 
 /* ===== 盈亏表格 ===== */
+.pf-summary { background: linear-gradient(135deg, #eef3ff, #f0f4f8); border-bottom: 2px solid #4da6ff; }
+.pf-summary td { padding: 10px 8px; }
 .profit-view { padding: 0 12px 40px; }
 .pf-table-wrap { overflow-x: auto; padding: 8px 4px; }
 .pf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
