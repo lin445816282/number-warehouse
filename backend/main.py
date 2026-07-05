@@ -1323,7 +1323,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
             reset_tomorrow.add(hit_group)
 
     total_days = day_offset + len(process_dates)
-    if is_new_run or pending_days:
+    if is_new_run:
         db.execute(
             "UPDATE sim_runs SET end_date=?, total_days=?, hit_count=? WHERE id=?",
             (process_dates[-1] if process_dates else end_date, total_days, hit_count, run_id)
@@ -1462,18 +1462,25 @@ def run_simulation_endpoint(body: SimRunRequest):
 @app.get("/api/sim/results/query")
 def query_sim_results(
     project_id: Optional[int] = None,
+    project_ids: Optional[str] = None,
     rule_id: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
     page_size: int = 30
 ):
-    """查询模拟运行记录（支持多条件筛选）"""
+    """查询模拟运行记录（支持多条件筛选，project_ids为逗号分隔）"""
     db = get_db()
     wheres = ["1=1"]
     params = []
 
-    if project_id:
+    if project_ids:
+        ids = [int(x) for x in project_ids.split(',') if x.strip().isdigit()]
+        if ids:
+            placeholders = ','.join('?' * len(ids))
+            wheres.append(f"r.project_id IN ({placeholders})")
+            params.extend(ids)
+    elif project_id:
         wheres.append("r.project_id=?")
         params.append(project_id)
     if rule_id:
@@ -1691,8 +1698,9 @@ def api_clear_analysis():
 
 @app.get("/api/analysis")
 def get_analysis(start_date: str = "2020-03-18", end_date: str = "2026-07-03",
-                 page: int = 1, page_size: int = 50, project_id: int = None):
-    """数据分析：从 analysis_daily 读，支持按项目筛选"""
+                 page: int = 1, page_size: int = 50, project_id: int = None,
+                 project_ids: str = None):
+    """数据分析：从 analysis_daily 读，支持按项目或项目列表筛选"""
     db = get_db()
 
     cnt = db.execute("SELECT COUNT(*) FROM analysis_daily").fetchone()[0]
@@ -1702,7 +1710,13 @@ def get_analysis(start_date: str = "2020-03-18", end_date: str = "2026-07-03",
 
     where = "WHERE date BETWEEN ? AND ?"
     params = [start_date, end_date]
-    if project_id:
+    if project_ids:
+        ids = [int(x) for x in project_ids.split(',') if x.strip().isdigit()]
+        if ids:
+            placeholders = ','.join('?' * len(ids))
+            where += f" AND project_id IN ({placeholders})"
+            params.extend(ids)
+    elif project_id:
         where += " AND project_id = ?"
         params.append(project_id)
 
@@ -2077,7 +2091,9 @@ def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
                 "hit_group": "", "value": 0, "hit_count": 0, "total_days": 0,
             })
 
-    return {"last_date": use_date, "grid": grid_list, "projects": projects}
+    rec = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+    return {"last_date": use_date, "grid": grid_list, "projects": projects,
+            "draw_number": rec["draw_number"] if rec else None}
 
 
 @app.get("/api/run-groups/{rgid}/grid")
@@ -2217,6 +2233,55 @@ def update_run_group_items(rgid: int, body: RunGroupItemUpdate):
     return {"ok": True}
 
 
+# --- 演算当天：按范围取项目+规则 ---
+
+@app.get("/api/scope/projects")
+def get_scope_projects(
+    collection_id: Optional[int] = Query(None),
+    summary_id: Optional[int] = Query(None),
+    run_group_id: Optional[int] = Query(None),
+):
+    """按范围（集合/汇总/记录组）获取去重项目列表及其活跃规则。
+    不传任何参数则返回全部项目。"""
+    db = get_db()
+    base_sql = (
+        "SELECT DISTINCT p.id as project_id, p.name as project_name, "
+        "sr.id as rule_id, sr.name as rule_name, sr.shift_amount "
+        "FROM projects p "
+        "LEFT JOIN sim_rules sr ON sr.project_id = p.id AND sr.is_active = 1 "
+    )
+    if run_group_id:
+        rows = db.execute(
+            base_sql +
+            "JOIN run_group_items rgi ON rgi.project_id = p.id "
+            "WHERE rgi.run_group_id = ? AND p.deleted_at IS NULL",
+            (run_group_id,)
+        ).fetchall()
+    elif summary_id:
+        rows = db.execute(
+            base_sql +
+            "JOIN run_group_items rgi ON rgi.project_id = p.id "
+            "JOIN run_groups rg ON rgi.run_group_id = rg.id "
+            "WHERE rg.summary_id = ? AND p.deleted_at IS NULL",
+            (summary_id,)
+        ).fetchall()
+    elif collection_id:
+        rows = db.execute(
+            base_sql +
+            "JOIN run_group_items rgi ON rgi.project_id = p.id "
+            "JOIN run_groups rg ON rgi.run_group_id = rg.id "
+            "JOIN summaries s ON rg.summary_id = s.id "
+            "WHERE s.collection_id = ? AND p.deleted_at IS NULL",
+            (collection_id,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            base_sql + "WHERE p.deleted_at IS NULL"
+        ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
 # --- 四层下钻查询 ---
 
 @app.get("/api/run-groups/{rgid}/items")
@@ -2274,19 +2339,30 @@ def get_run_group_results(rgid: int):
 
 @app.get("/api/run-group-items/{item_id}/grid")
 def get_item_grid(item_id: int, date: str = None):
-    """单个项目的 49 格明细"""
+    """单个项目的 49 格明细 — sim_run_id=0 时自动取该项目最新 sim_run"""
     db = get_db()
     item = db.execute("SELECT * FROM run_group_items WHERE id=?", (item_id,)).fetchone()
     if not item:
         db.close()
         raise HTTPException(404, "项目不存在")
-    if item["sim_run_id"] <= 0:
-        db.close()
-        return {"project_name": item["project_name"], "last_date": "", "grid": []}
+
+    run_id = item["sim_run_id"]
+    # 检查当前 run_id 是否有数据，没有则回退到最新有数据的 sim_run
+    has_data = run_id > 0 and db.execute("SELECT 1 FROM sim_results WHERE run_id=? LIMIT 1", (run_id,)).fetchone()
+    if not has_data:
+        latest = db.execute(
+            "SELECT id FROM sim_runs WHERE project_id=? AND id IN (SELECT DISTINCT run_id FROM sim_results) ORDER BY id DESC LIMIT 1",
+            (item["project_id"],)
+        ).fetchone()
+        if latest:
+            run_id = latest["id"]
+            db.execute("UPDATE run_group_items SET sim_run_id=? WHERE id=?", (run_id, item_id))
+            db.commit()
+        else:
+            db.close()
+            return {"project_name": item["project_name"], "last_date": "", "grid": [], "total": 0}
 
     value_map = get_count_map_dict(db)
-    run_id = item["sim_run_id"]
-
     if date:
         use_date = date
     else:
@@ -2312,6 +2388,7 @@ def get_item_grid(item_id: int, date: str = None):
 
     grid_list = [{"n": n, "value": grid[n]} for n in range(1, 50)]
     total = sum(g["value"] for g in grid_list)
+    rec = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
 
     db.close()
     return {
@@ -2319,6 +2396,7 @@ def get_item_grid(item_id: int, date: str = None):
         "last_date": use_date,
         "grid": grid_list,
         "total": total,
+        "draw_number": rec["draw_number"] if rec else None,
     }
 
 

@@ -282,10 +282,6 @@
       <!-- 查询栏 -->
       <div class="sim-query card">
         <div class="sim-param-row">
-          <select v-model="simQProject" class="form-input" style="flex:1">
-            <option :value="null">全部项目</option>
-            <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
-          </select>
           <div class="date-picker-field date-picker-sm" @click="openDatePicker(simQStart, v => simQStart = v, $event)" style="flex:1">
             {{ simQStart ? simQStart : '起始日' }}
             <span class="date-arrow">📅</span>
@@ -296,6 +292,20 @@
             <span class="date-arrow">📅</span>
           </div>
           <button class="btn-add-sm" @click="simQPage=1;loadSimQuery()">🔍 查询</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <select v-model="simQL3" class="form-input" @change="onSimQL3Change">
+            <option value="all">全部项目</option>
+            <option v-for="c in collections" :key="'qc'+c.id" :value="'c'+c.id">📁 {{ c.name }}</option>
+          </select>
+          <select v-if="simQCID" v-model="simQL2" class="form-input" @change="onSimQL2Change">
+            <option value="">📁 整个集合</option>
+            <option v-for="s in simQScopeSummaries" :key="'qs'+s.id" :value="'s'+s.id">📊 {{ s.name }}</option>
+          </select>
+          <select v-if="simQSID" v-model="simQL1" class="form-input" @change="onSimQL1Change">
+            <option value="">📊 整个汇总</option>
+            <option v-for="rg in simQScopeRunGroups" :key="'qrg'+rg.id" :value="'r'+rg.id">📋 {{ rg.name }} ({{ rg.project_count }}项)</option>
+          </select>
         </div>
       </div>
 
@@ -313,7 +323,13 @@
             <span class="date-arrow">📅</span>
           </div>
         </div>
-        <div class="sim-subtitle-sm">📦 项目 & 规则</div>
+        <div class="sim-subtitle-sm" style="display:flex;justify-content:space-between;align-items:center">
+          <span>📦 项目 & 规则</span>
+          <div style="display:flex;gap:4px">
+            <button class="btn-add-sm" @click="selectAllProjects">全选</button>
+            <button class="btn-add-sm" style="background:#f5f7fa;color:#8899b0" @click="deselectAllProjects">取消</button>
+          </div>
+        </div>
         <div v-for="p in projects" :key="p.id" class="sim-proj-row"
              :class="{ active: simProjectIds.includes(p.id) }">
           <label class="sim-cb">
@@ -423,10 +439,18 @@
           </div>
           <button class="btn-add-sm" @click="anPage=1;loadAnalysis()">🔍 查询</button>
         </div>
-        <div class="sim-param-row">
-          <select v-model="anProject" class="form-input" style="flex:1">
-            <option :value="null">全部项目</option>
-            <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <select v-model="anL3" class="form-input" @change="onAnL3Change">
+            <option value="all">全部项目</option>
+            <option v-for="c in collections" :key="'ac'+c.id" :value="'c'+c.id">📁 {{ c.name }}</option>
+          </select>
+          <select v-if="anCID" v-model="anL2" class="form-input" @change="onAnL2Change">
+            <option value="">📁 整个集合</option>
+            <option v-for="s in anScopeSummaries" :key="'as'+s.id" :value="'s'+s.id">📊 {{ s.name }}</option>
+          </select>
+          <select v-if="anSID" v-model="anL1" class="form-input" @change="onAnL1Change">
+            <option value="">📊 整个汇总</option>
+            <option v-for="rg in anScopeRunGroups" :key="'arg'+rg.id" :value="'r'+rg.id">📋 {{ rg.name }} ({{ rg.project_count }}项)</option>
           </select>
         </div>
       </div>
@@ -510,7 +534,10 @@
     <div v-if="view === 'collection'" class="col-view">
       <div class="sim-header">
         <span class="sim-title">📁 集合</span>
-        <button class="btn-add" @click="openAddCollection">+ 集合</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn-add" style="background:linear-gradient(135deg,#22c55e,#0ea5e9)" @click="openTodayRun">⚡ 演算当天</button>
+          <button class="btn-add" @click="openAddCollection">+ 集合</button>
+        </div>
       </div>
       <div class="col-crumb" v-if="colSel">
         <span @click="backTo('collections')">📁 集合</span>
@@ -528,6 +555,12 @@
       <div v-if="grid49" class="grid49-section card">
         <div class="grid49-hd">
           <span>📅 {{ grid49.last_date || '无数据' }}</span>
+          <span v-if="grid49.draw_number" style="font-size:12px;color:#1a2a4a;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+            抽<b style="font-size:16px;color:#4da6ff">{{ grid49.draw_number }}</b> →
+            <b style="color:#f59e0b">{{ gridDrawVal?.toLocaleString() }}</b> × 47 −
+            <b style="color:#8899b0">{{ gridTotalSum.toLocaleString() }}</b> =
+            <b :style="{color:gridResult>=0?'#22c55e':'#ee0a24',fontSize:'16px'}">{{ gridResult?.toLocaleString() }}</b>
+          </span>
           <span class="grid49-sum" :style="{color:gridTotalSum>=0?'#22c55e':'#ee0a24'}">累计 ¥{{ gridTotalSum.toLocaleString() }}</span>
           <div style="display:flex;gap:6px;align-items:center">
             <div class="date-picker-field date-picker-sm" style="width:110px" @click="openDatePicker(gridDate, v => gridDate = v, $event)">
@@ -712,11 +745,56 @@
         </div>
       </div>
     </div>
+    <!-- 弹窗：演算当天 -->
+    <div v-if="showTodayRun" class="form-overlay" @click.self="showTodayRun=false">
+      <div class="form-card" style="max-width:380px">
+        <div class="form-title">⚡ 演算当天</div>
+        <label>日期</label>
+        <div class="date-picker-field" style="text-align:left" @click="openDatePicker(todayRunDate, v => todayRunDate = v, $event)">
+          {{ todayRunDate || '点击选择日期' }}
+          <span class="date-arrow">📅</span>
+        </div>
+        <label>范围</label>
+        <select v-model="trL3" class="form-input" @change="onTrL3Change">
+          <option value="all">全部项目</option>
+          <option v-for="c in collections" :key="'c'+c.id" :value="'c'+c.id">📁 {{ c.name }}</option>
+        </select>
+        <select v-if="trCID" v-model="trL2" class="form-input" style="margin-top:8px" @change="onTrL2Change">
+          <option value="">📁 整个集合</option>
+          <option v-for="s in scopeSummaries" :key="'s'+s.id" :value="'s'+s.id">📊 {{ s.name }}</option>
+        </select>
+        <select v-if="trSID" v-model="trL1" class="form-input" style="margin-top:8px" @change="onTrL1Change">
+          <option value="">📊 整个汇总</option>
+          <option v-for="rg in scopeRunGroups" :key="'rg'+rg.id" :value="'r'+rg.id">📋 {{ rg.name }} ({{ rg.project_count }}项)</option>
+        </select>
+        <div v-if="scopeProjects.length" style="margin-top:12px">
+          <div class="sim-subtitle-sm">将演算 {{ scopeProjects.length }} 个项目：</div>
+          <div v-for="p in scopeProjects" :key="p.project_id" class="scope-proj-row">
+            <span>{{ p.project_name }}</span>
+            <span class="scope-rule-tag">{{ p.rule_name || '⚠ 无规则' }}</span>
+          </div>
+        </div>
+        <div v-else-if="trL3 !== 'all'" class="gs-empty" style="padding:16px 0">所选范围下无项目</div>
+        <div class="form-btns">
+          <button class="btn-cancel" @click="showTodayRun=false">取消</button>
+          <button class="btn-submit" @click="execTodayRun" :disabled="!canTodayRun||todayRunRunning">
+            <span v-if="todayRunRunning" class="btn-spin"></span>
+            {{ todayRunRunning ? '运行中...' : '▶️ 演算今天' }}
+          </button>
+        </div>
+      </div>
+    </div>
     <!-- 弹窗：单项目 49 格明细 -->
     <div v-if="showProjDetail" class="form-overlay" @click.self="showProjDetail=false">
       <div class="form-card" style="max-width:420px">
         <div class="form-title">{{ projDetail?.project_name }} · 49格明细</div>
         <div style="font-size:12px;color:#8899b0;margin-bottom:8px">📅 {{ projDetail?.last_date || '无数据' }} · 累计 ¥{{ (projDetail?.total||0).toLocaleString() }}</div>
+        <div v-if="projDetail?.draw_number" style="font-size:12px;color:#1a2a4a;margin-bottom:8px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+          抽<b style="font-size:16px;color:#4da6ff">{{ projDetail.draw_number }}</b> →
+          <b style="color:#f59e0b">{{ projDrawVal?.toLocaleString() }}</b> × 47 −
+          <b style="color:#8899b0">{{ (projDetail.total||0).toLocaleString() }}</b> =
+          <b :style="{color:projResult>=0?'#22c55e':'#ee0a24',fontSize:'16px'}">{{ projResult?.toLocaleString() }}</b>
+        </div>
         <div class="grid49-table" v-if="projDetail?.grid?.length">
           <div v-for="g in projDetail.grid" :key="g.n" class="grid49-cell" :class="{zero:g.value===0}">
             <span class="g49-n">{{ g.n }}</span>
@@ -1358,6 +1436,11 @@ async function loadSimRules() {
       byP[r.project_id].push(r)
     }
     rulesByProject.value = byP
+    // 默认全选项目
+    if (!simProjectIds.value.length && projects.value.length) {
+      simProjectIds.value = projects.value.map(p => p.id)
+      projects.value.forEach(p => { if ((byP[p.id]||[]).length) simProjectRules.value[p.id] = byP[p.id][0].id })
+    }
     // 默认日期范围
     if (!simStart.value) simStart.value = '2020-03-18'
     if (!simEnd.value) simEnd.value = todayStr
@@ -1367,7 +1450,7 @@ async function loadSimRules() {
 
 async function loadSimQuery() {
   const params = new URLSearchParams()
-  if (simQProject.value) params.set('project_id', simQProject.value)
+  if (simQScope.cachedIds.length) params.set('project_ids', simQScope.cachedIds.join(','))
   if (simQStart.value) params.set('start_date', simQStart.value)
   if (simQEnd.value) params.set('end_date', simQEnd.value)
   params.set('page', simQPage.value)
@@ -1487,7 +1570,7 @@ async function loadAnalysis() {
     page: anPage.value,
     page_size: '50',
   })
-  if (anProject.value) params.set('project_id', anProject.value)
+  if (anScope.cachedIds.length) params.set('project_ids', anScope.cachedIds.join(','))
   try {
     const res = await fetch(`${API}/analysis?${params}`)
     const data = await res.json()
@@ -1537,11 +1620,31 @@ const gridTotalSum = computed(() => {
   if (!grid49.value?.grid) return 0
   return grid49.value.grid.reduce((s, g) => s + (g.value || 0), 0)
 })
+const gridDrawVal = computed(() => {
+  const dn = grid49.value?.draw_number
+  if (!dn || !grid49.value?.grid) return null
+  const cell = grid49.value.grid.find(g => g.n === dn)
+  return cell ? cell.value : null
+})
+const gridResult = computed(() => {
+  if (gridDrawVal.value == null) return null
+  return gridDrawVal.value * 47 - gridTotalSum.value
+})
 
 const showEditItems = ref(false)
 const editItemsForm = ref({ project_ids: [] })
 const showProjDetail = ref(false)
 const projDetail = ref(null)
+const projDrawVal = computed(() => {
+  const dn = projDetail.value?.draw_number
+  if (!dn || !projDetail.value?.grid) return null
+  const cell = projDetail.value.grid.find(g => g.n === dn)
+  return cell ? cell.value : null
+})
+const projResult = computed(() => {
+  if (projDrawVal.value == null) return null
+  return projDrawVal.value * 47 - (projDetail.value?.total || 0)
+})
 
 async function loadCollections() {
   try {
@@ -1564,7 +1667,9 @@ async function loadGrid(level, id, date = '') {
             : `${API}/run-groups/${id}/grid`
     if (date) url += `?date=${encodeURIComponent(date)}`
     const res = await fetch(url)
-    grid49.value = await res.json()
+    const data = await res.json()
+    console.log('loadGrid', level, id, 'cells:', data.grid?.length, 'proj:', data.projects?.length)
+    grid49.value = data
     gridLevel.value = level
     gridId.value = id
     gridDate.value = date || grid49.value?.last_date || ''
@@ -1754,8 +1859,10 @@ async function openProjGrid(it) {
   showProjDetail.value = true
   try {
     const res = await fetch(`${API}/run-group-items/${it.id}/grid`)
-    projDetail.value = await res.json()
-  } catch (e) { $notify(e.message, true); showProjDetail.value = false }
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '请求失败')
+    projDetail.value = data
+  } catch (e) { $notify('打开失败: ' + e.message, true); showProjDetail.value = false }
 }
 
 async function getActiveSimRunId(pid) {
@@ -1807,6 +1914,173 @@ async function execRunGroup() {
 function openRunDialog() {
   runForm.value = { start_date: '2020-03-18', end_date: todayStr }
   showRunDialog.value = true
+}
+
+// ===== 演算当天 =====
+const showTodayRun = ref(false)
+const todayRunDate = ref(todayStr)
+const todayRunRunning = ref(false)
+const trL3 = ref('all'), trL2 = ref(''), trL1 = ref('')
+const trCID = computed(() => trL3.value !== 'all')
+const trSID = computed(() => trCID.value && trL2.value !== '')
+const scopeSummaries = ref([])
+const scopeRunGroups = ref([])
+const scopeProjects = ref([])
+
+const canTodayRun = computed(() => scopeProjects.value.length > 0 && todayRunDate.value)
+
+function openTodayRun() {
+  if (!collections.value.length) loadCollections()
+  todayRunDate.value = todayStr
+  trL3.value = 'all'; trL2.value = ''; trL1.value = ''
+  scopeSummaries.value = []; scopeRunGroups.value = []; scopeProjects.value = []
+  showTodayRun.value = true
+}
+
+async function onTrL3Change() {
+  trL2.value = ''; trL1.value = ''; scopeRunGroups.value = []
+  if (trL3.value === 'all') { scopeSummaries.value = []; scopeProjects.value = []; return }
+  const cid = parseInt(trL3.value.slice(1))
+  try { const r = await fetch(`${API}/collections/${cid}/summaries`); scopeSummaries.value = await r.json() } catch(e) { scopeSummaries.value = [] }
+  loadTrScopeProjects()
+}
+async function onTrL2Change() {
+  trL1.value = ''; scopeRunGroups.value = []
+  if (trL2.value) {
+    const sid = parseInt(trL2.value.slice(1))
+    try { const r = await fetch(`${API}/summaries/${sid}/run-groups`); scopeRunGroups.value = await r.json() } catch(e) { scopeRunGroups.value = [] }
+  }
+  loadTrScopeProjects()
+}
+async function onTrL1Change() { loadTrScopeProjects() }
+
+async function loadTrScopeProjects() {
+  const params = new URLSearchParams()
+  if (trL1.value && trL1.value.startsWith('r')) params.set('run_group_id', parseInt(trL1.value.slice(1)))
+  else if (trL2.value && trL2.value.startsWith('s')) params.set('summary_id', parseInt(trL2.value.slice(1)))
+  else if (trL3.value !== 'all') params.set('collection_id', parseInt(trL3.value.slice(1)))
+  try {
+    const res = await fetch(`${API}/scope/projects?${params}`)
+    scopeProjects.value = await res.json()
+  } catch (e) { scopeProjects.value = [] }
+}
+
+async function execTodayRun() {
+  if (!canTodayRun.value) return
+  todayRunRunning.value = true
+  try {
+    const pids = scopeProjects.value.map(p => p.project_id)
+    const rids = scopeProjects.value.map(p => p.rule_id || 0)
+    const res = await fetch(`${API}/sim/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rule_ids: rids,
+        project_ids: pids,
+        start_date: todayRunDate.value,
+        end_date: todayRunDate.value,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '运行失败')
+    const runs = data.runs || []
+    const hits = runs.reduce((s, r) => s + (r.hit_count || 0), 0)
+    const days = runs.reduce((s, r) => s + (r.total_days || 0), 0)
+    $notify(`✅ 演算完成 ${runs.length}项目 · 命中 ${hits}/${days}`)
+    showTodayRun.value = false
+  } catch (e) { $notify(e.message, true) }
+  todayRunRunning.value = false
+}
+
+// ===== 共享范围工具 =====
+async function loadScopeProjectsCached(scope, cid, sid, rgid) {
+  const params = new URLSearchParams()
+  if (rgid) params.set('run_group_id', rgid)
+  else if (sid) params.set('summary_id', sid)
+  else if (cid) params.set('collection_id', cid)
+  try {
+    const res = await fetch(`${API}/scope/projects?${params}`)
+    const data = await res.json()
+    scope.cachedIds = data.map(p => p.project_id)
+  } catch (e) { scope.cachedIds = [] }
+}
+
+// ===== 分析范围 (L3=集合 L2=汇总 L1=记录组) =====
+const anL3 = ref('all'), anL2 = ref(''), anL1 = ref('')
+const anCID = computed(() => anL3.value !== 'all')
+const anSID = computed(() => anCID.value && anL2.value !== '')
+const anScope = reactive({ cachedIds: [] })
+const anScopeSummaries = ref([])
+const anScopeRunGroups = ref([])
+
+async function onAnL3Change() {
+  anL2.value = ''; anL1.value = ''; anScopeRunGroups.value = []
+  if (anL3.value === 'all') { anScopeSummaries.value = []; anScope.cachedIds = []; anPage.value = 1; loadAnalysis(); return }
+  const cid = parseInt(anL3.value.slice(1))
+  try { const r = await fetch(`${API}/collections/${cid}/summaries`); anScopeSummaries.value = await r.json() } catch(e) { anScopeSummaries.value = [] }
+  await loadScopeProjectsCached(anScope, cid, null, null)
+  anPage.value = 1; loadAnalysis()
+}
+async function onAnL2Change() {
+  anL1.value = ''; anScopeRunGroups.value = []
+  const cid = parseInt(anL3.value.slice(1))
+  let sid = null
+  if (anL2.value) {
+    sid = parseInt(anL2.value.slice(1))
+    try { const r = await fetch(`${API}/summaries/${sid}/run-groups`); anScopeRunGroups.value = await r.json() } catch(e) { anScopeRunGroups.value = [] }
+  }
+  await loadScopeProjectsCached(anScope, cid, sid, null)
+  anPage.value = 1; loadAnalysis()
+}
+async function onAnL1Change() {
+  const sid = anL2.value ? parseInt(anL2.value.slice(1)) : null
+  const rgid = anL1.value ? parseInt(anL1.value.slice(1)) : null
+  await loadScopeProjectsCached(anScope, null, sid, rgid)
+  anPage.value = 1; loadAnalysis()
+}
+
+// ===== 演算查询范围 =====
+const simQL3 = ref('all'), simQL2 = ref(''), simQL1 = ref('')
+const simQCID = computed(() => simQL3.value !== 'all')
+const simQSID = computed(() => simQCID.value && simQL2.value !== '')
+const simQScope = reactive({ cachedIds: [] })
+const simQScopeSummaries = ref([])
+const simQScopeRunGroups = ref([])
+
+async function onSimQL3Change() {
+  simQL2.value = ''; simQL1.value = ''; simQScopeRunGroups.value = []
+  if (simQL3.value === 'all') { simQScopeSummaries.value = []; simQScope.cachedIds = []; simQPage.value = 1; loadSimQuery(); return }
+  const cid = parseInt(simQL3.value.slice(1))
+  try { const r = await fetch(`${API}/collections/${cid}/summaries`); simQScopeSummaries.value = await r.json() } catch(e) { simQScopeSummaries.value = [] }
+  await loadScopeProjectsCached(simQScope, cid, null, null)
+  simQPage.value = 1; loadSimQuery()
+}
+async function onSimQL2Change() {
+  simQL1.value = ''; simQScopeRunGroups.value = []
+  const cid = parseInt(simQL3.value.slice(1))
+  let sid = null
+  if (simQL2.value) {
+    sid = parseInt(simQL2.value.slice(1))
+    try { const r = await fetch(`${API}/summaries/${sid}/run-groups`); simQScopeRunGroups.value = await r.json() } catch(e) { simQScopeRunGroups.value = [] }
+  }
+  await loadScopeProjectsCached(simQScope, cid, sid, null)
+  simQPage.value = 1; loadSimQuery()
+}
+async function onSimQL1Change() {
+  const sid = simQL2.value ? parseInt(simQL2.value.slice(1)) : null
+  const rgid = simQL1.value ? parseInt(simQL1.value.slice(1)) : null
+  await loadScopeProjectsCached(simQScope, null, sid, rgid)
+  simQPage.value = 1; loadSimQuery()
+}
+
+// ===== 演算运行全选 =====
+function selectAllProjects() {
+  simProjectIds.value = projects.value.map(p => p.id)
+  projects.value.forEach(p => { if (!simProjectRules.value[p.id] && (rulesByProject.value[p.id]||[]).length) simProjectRules.value[p.id] = rulesByProject.value[p.id][0].id })
+}
+function deselectAllProjects() {
+  simProjectIds.value = []
+  simProjectRules.value = {}
 }
 </script>
 
@@ -2201,4 +2475,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .g49-proj-list { padding: 4px 0; }
 .g49-proj-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; }
 .g49-pv { font-weight: 700; color: #22c55e; }
+
+/* ===== 演算当天 ===== */
+.scope-proj-row { display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f8fafc;border-radius:8px;margin-bottom:4px;font-size:13px }
+.scope-rule-tag { font-size:11px;background:#eef3ff;color:#4da6ff;padding:2px 8px;border-radius:6px }
 </style>
