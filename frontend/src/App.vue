@@ -10,6 +10,7 @@
       <span :class="{ active: view === 'collection' }" @click="view = 'collection'; loadCollections()">📁 集合</span>
       <span :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">📈 分析</span>
       <span :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">🚀 演算</span>
+      <span :class="{ active: view === 'profit' }" @click="view = 'profit'; loadCollections(); loadProfit()">💰 盈亏</span>
       <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 记录</span>
       <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别</span>
       <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 规则</span>
@@ -415,6 +416,64 @@
 
       <div v-if="!simQItems.length && !simResult" class="gs-empty">
         选择日期范围查询已有运行记录，或点击「运行」
+      </div>
+    </div>
+
+    <!-- 盈亏视图 -->
+    <div v-if="view === 'profit'" class="profit-view">
+      <div class="sim-header">
+        <span class="sim-title">💰 盈亏</span>
+      </div>
+      <div class="sim-query card">
+        <div class="sim-param-row">
+          <div class="date-picker-field date-picker-sm" @click="openDatePicker(pfDate, v => pfDate = v, $event)" style="flex:1">
+            {{ pfDate || '选择日期' }}
+            <span class="date-arrow">📅</span>
+          </div>
+          <button class="btn-add-sm" @click="pfPage=1;loadProfit()">🔍 查询</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <select v-model="pfL3" class="form-input" @change="onPfL3Change">
+            <option value="all">全部项目</option>
+            <option v-for="c in collections" :key="'pc'+c.id" :value="'c'+c.id">📁 {{ c.name }}</option>
+          </select>
+          <select v-if="pfCID" v-model="pfL2" class="form-input" @change="onPfL2Change">
+            <option value="">📁 整个集合</option>
+            <option v-for="s in pfSummaries" :key="'ps'+s.id" :value="'s'+s.id">📊 {{ s.name }}</option>
+          </select>
+          <select v-if="pfSID" v-model="pfL1" class="form-input" @change="onPfL1Change">
+            <option value="">📊 整个汇总</option>
+            <option v-for="rg in pfRunGroups" :key="'prg'+rg.id" :value="'r'+rg.id">📋 {{ rg.name }} ({{ rg.project_count }}项)</option>
+          </select>
+        </div>
+      </div>
+
+      <div v-if="pfItems.length" class="pf-table-wrap card">
+        <table class="pf-table">
+          <thead><tr>
+            <th>日期</th><th>项目</th><th>抽签</th><th>排位</th><th>对应值</th><th>累计</th><th>结果</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="it in pfItems" :key="it.date+it.project_id">
+              <td>{{ it.date }}</td>
+              <td>{{ it.project_name }}</td>
+              <td style="color:#4da6ff;font-weight:700">{{ it.draw || '-' }}</td>
+              <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
+              <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
+              <td class="pf-num">{{ (it.cumulative||0).toLocaleString() }}</td>
+              <td class="pf-result" :class="{neg:it.result<0,pos:it.result>=0}">{{ it.result != null ? it.result.toLocaleString() : '-' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else-if="pfSearched" class="gs-empty">无数据</div>
+
+      <div class="sim-pager" v-if="pfPages > 1">
+        <button :disabled="pfPage<=1" @click="pfPage=1;loadProfit()">«</button>
+        <button :disabled="pfPage<=1" @click="pfPage--;loadProfit()">‹</button>
+        <span>{{ pfPage }} / {{ pfPages }}</span>
+        <button :disabled="pfPage>=pfPages" @click="pfPage++;loadProfit()">›</button>
+        <button :disabled="pfPage>=pfPages" @click="pfPage=pfPages;loadProfit()">»</button>
       </div>
     </div>
 
@@ -2082,6 +2141,45 @@ function deselectAllProjects() {
   simProjectIds.value = []
   simProjectRules.value = {}
 }
+
+// 盈亏 — 单日 (v0704tn)
+const pfL3 = ref('all'), pfL2 = ref(''), pfL1 = ref('')
+const pfCID = computed(() => pfL3.value !== 'all')
+const pfSID = computed(() => pfCID.value && pfL2.value !== '')
+const pfSummaries = ref([]), pfRunGroups = ref([])
+const pfDate = ref(todayStr)
+const pfPage = ref(1), pfPages = ref(1)
+const pfItems = ref([])
+const pfSearched = ref(false)
+
+async function loadProfit() {
+  pfSearched.value = true
+  const params = new URLSearchParams({ date: pfDate.value, page: pfPage.value, page_size: '30' })
+  if (pfL1.value && pfL1.value.startsWith('r')) params.set('run_group_id', parseInt(pfL1.value.slice(1)))
+  else if (pfL2.value && pfL2.value.startsWith('s')) params.set('summary_id', parseInt(pfL2.value.slice(1)))
+  else if (pfL3.value !== 'all') params.set('collection_id', parseInt(pfL3.value.slice(1)))
+  try {
+    const res = await fetch(`${API}/scope/daily?${params}`)
+    const data = await res.json()
+    pfItems.value = data.items; pfPages.value = data.total_pages; pfPage.value = data.page
+  } catch (e) { console.error(e) }
+}
+async function onPfL3Change() {
+  pfL2.value = ''; pfL1.value = ''; pfRunGroups.value = []
+  if (pfL3.value === 'all') { pfSummaries.value = []; pfItems.value = []; pfSearched.value = false; return }
+  const cid = parseInt(pfL3.value.slice(1))
+  try { const r = await fetch(`${API}/collections/${cid}/summaries`); pfSummaries.value = await r.json() } catch(e) { pfSummaries.value = [] }
+  pfPage.value = 1; loadProfit()
+}
+async function onPfL2Change() {
+  pfL1.value = ''; pfRunGroups.value = []
+  if (pfL2.value) {
+    const sid = parseInt(pfL2.value.slice(1))
+    try { const r = await fetch(`${API}/summaries/${sid}/run-groups`); pfRunGroups.value = await r.json() } catch(e) { pfRunGroups.value = [] }
+  }
+  pfPage.value = 1; loadProfit()
+}
+async function onPfL1Change() { pfPage.value = 1; loadProfit() }
 </script>
 
 <style>
@@ -2479,4 +2577,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 /* ===== 演算当天 ===== */
 .scope-proj-row { display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f8fafc;border-radius:8px;margin-bottom:4px;font-size:13px }
 .scope-rule-tag { font-size:11px;background:#eef3ff;color:#4da6ff;padding:2px 8px;border-radius:6px }
+
+/* ===== 盈亏表格 ===== */
+.profit-view { padding: 0 12px 40px; }
+.pf-table-wrap { overflow-x: auto; padding: 8px 4px; }
+.pf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pf-table th, .pf-table td { padding: 8px 6px; text-align: center; border-bottom: 1px solid #e8ecf1; white-space: nowrap; }
+.pf-table th { color: #8899b0; font-weight: 600; font-size: 11px; }
+.pf-table td:first-child, .pf-table td:nth-child(2) { text-align: left; }
+.pf-num { font-weight: 600; color: #1a2a4a; }
+.pf-result { font-weight: 700; }
+.pf-result.pos { color: #22c55e; }
+.pf-result.neg { color: #ee0a24; }
+.pf-table tbody tr:hover { background: #f8fafc; }
 </style>

@@ -2337,6 +2337,111 @@ def get_run_group_results(rgid: int):
     return {"items": sorted(daily.values(), key=lambda x: x["date"], reverse=True)}
 
 
+# --- 盈亏日明细 ---
+
+@app.get("/api/scope/daily")
+def get_scope_daily(
+    collection_id: Optional[int] = Query(None),
+    summary_id: Optional[int] = Query(None),
+    run_group_id: Optional[int] = Query(None),
+    date: str = None,
+    page: int = 1,
+    page_size: int = 30,
+):
+    """按范围取单日盈亏明细：日期/项目/抽签/排位/对应值/累计/结果"""
+    if not date:
+        date = date.today().isoformat()
+    db = get_db()
+    # 解析范围→project_ids
+    if run_group_id:
+        rows = db.execute("SELECT project_id FROM run_group_items WHERE run_group_id=?", (run_group_id,)).fetchall()
+    elif summary_id:
+        rows = db.execute(
+            "SELECT DISTINCT rgi.project_id FROM run_group_items rgi JOIN run_groups rg ON rgi.run_group_id=rg.id WHERE rg.summary_id=?",
+            (summary_id,)
+        ).fetchall()
+    elif collection_id:
+        rows = db.execute(
+            "SELECT DISTINCT rgi.project_id FROM run_group_items rgi JOIN run_groups rg ON rgi.run_group_id=rg.id JOIN summaries s ON rg.summary_id=s.id WHERE s.collection_id=?",
+            (collection_id,)
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT id as project_id FROM projects WHERE deleted_at IS NULL").fetchall()
+    pids = [r["project_id"] for r in rows]
+    if not pids:
+        db.close()
+        return {"items": [], "total": 0, "page": 1, "total_pages": 0}
+
+    # count→value 映射
+    value_map = get_count_map_dict(db)
+
+    # 每个项目取最新 sim_run
+    pids_sql = ",".join("?" * len(pids))
+    runs = db.execute(
+        f"SELECT srn.id, srn.project_id FROM sim_runs srn WHERE srn.project_id IN ({pids_sql}) AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id=srn.project_id)",
+        pids
+    ).fetchall()
+    run_by_pid = {r["project_id"]: r["id"] for r in runs}
+
+    # 查 analysis_daily（单日）
+    where = "WHERE project_id IN ({}) AND date = ?".format(pids_sql)
+    total = db.execute(
+        f"SELECT COUNT(*) FROM analysis_daily {where}", pids + [date]
+    ).fetchone()[0]
+    offset = (page - 1) * page_size
+    daily_rows = db.execute(
+        f"SELECT * FROM analysis_daily {where} ORDER BY date DESC, project_id LIMIT ? OFFSET ?",
+        pids + [date, page_size, offset]
+    ).fetchall()
+
+    # 预加载本页需要用到的 sim_results（按 run_id + date 批量取）
+    run_ids = list(set(run_by_pid.values()))
+    items = []
+    for r in daily_rows:
+        pid = r["project_id"]
+        rid = run_by_pid.get(pid)
+        dt = r["date"]
+        draw = r["draw_number"]
+        cumulative = r["cumulative_sum"]
+        # 构建 49 格
+        grid = {n: 0 for n in range(1, 50)}
+        if rid:
+            groups = db.execute(
+                "SELECT numbers_json, count_n FROM sim_results WHERE run_id=? AND date=?",
+                (rid, dt)
+            ).fetchall()
+            for g in groups:
+                nums = json.loads(g["numbers_json"])
+                val = value_map.get(g["count_n"], 0)
+                for n in nums:
+                    grid[n] = grid.get(n, 0) + val
+        # 排位 + 对应值
+        draw_val = grid.get(draw, 0) if draw else 0
+        rank = None
+        if draw and grid:
+            vals = sorted(set(v for v in grid.values() if v > 0), reverse=True)
+            if draw_val in vals:
+                rank = vals.index(draw_val) + 1
+        result = draw_val * 47 - cumulative if draw else None
+        items.append({
+            "date": dt,
+            "project_id": pid,
+            "project_name": r["project_name"],
+            "draw": draw,
+            "rank": rank,
+            "draw_value": draw_val,
+            "cumulative": cumulative,
+            "result": result,
+        })
+    db.close()
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
+
+
 @app.get("/api/run-group-items/{item_id}/grid")
 def get_item_grid(item_id: int, date: str = None):
     """单个项目的 49 格明细 — sim_run_id=0 时自动取该项目最新 sim_run"""
