@@ -78,6 +78,21 @@
         <span class="gs-title">⚙️ 组别</span>
         <button class="btn-add" @click="openAddProject">+ 项目</button>
       </div>
+      <!-- 集合筛选 → 汇总筛选 → 记录筛选 -->
+      <div style="padding:0 12px 8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <select v-model="gsColFilter" @change="onGsColChange" class="form-input" style="width:auto;padding:5px 8px;font-size:12px">
+          <option value="">📁 全部集合</option>
+          <option v-for="c in collections" :key="'gsf'+c.id" :value="c.id">📁 {{ c.name }}</option>
+        </select>
+        <select v-if="gsColFilter" v-model="gsSumFilter" @change="onGsSumChange" class="form-input" style="width:auto;padding:5px 8px;font-size:12px">
+          <option value="">📊 全部汇总</option>
+          <option v-for="s in gsScopeSummaries" :key="'gss'+s.id" :value="s.id">📊 {{ s.name }}</option>
+        </select>
+        <select v-if="gsSumFilter" v-model="gsRgFilter" @change="onGsRgChange" class="form-input" style="width:auto;padding:5px 8px;font-size:12px">
+          <option value="">📋 全部记录</option>
+          <option v-for="r in gsScopeRunGroups" :key="'gsr'+r.id" :value="r.id">📋 {{ r.name }}</option>
+        </select>
+      </div>
       <!-- 项目切换 -->
       <div class="gs-projects">
         <span v-for="p in projects" :key="p.id"
@@ -278,6 +293,9 @@
           <span v-if="running" class="btn-spin"></span>
           {{ running ? '演算中' : '运行' }}
         </button>
+        <button class="btn-add" style="background:#ee0a24;color:#fff;margin-left:8px" @click="clearAllSimData">
+          🗑️ 清空
+        </button>
       </div>
 
       <!-- 查询栏 -->
@@ -427,9 +445,14 @@
       <div class="sim-query card">
         <div class="sim-param-row">
           <div class="date-picker-field date-picker-sm" @click="openDatePicker(pfDate, v => pfDate = v, $event)" style="flex:1">
-            {{ pfDate || '选择日期' }}
+            {{ pfRange ? '起始：' : '' }}{{ pfDate || '选择日期' }}
             <span class="date-arrow">📅</span>
           </div>
+          <div v-if="pfRange" class="date-picker-field date-picker-sm" @click="openDatePicker(pfEnd, v => pfEnd = v, $event)" style="flex:1">
+            {{ pfEnd || '结束日' }}
+            <span class="date-arrow">📅</span>
+          </div>
+          <button class="btn-add-sm" @click="pfRange=!pfRange" :style="{background:pfRange?'#4da6ff':'#f0f4f8',color:pfRange?'#fff':'#8899b0'}">{{ pfRange ? '📆 段' : '📅 日' }}</button>
           <button class="btn-add-sm" @click="pfPage=1;loadProfit()">🔍 查询</button>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
@@ -448,7 +471,64 @@
         </div>
       </div>
 
-      <div v-if="pfItems.length" class="pf-table-wrap card">
+      <!-- 汇总层：集合→汇总列表 -->
+      <div v-if="pfItems.length && pfLevel==='summaries'" class="pf-table-wrap card">
+        <div style="font-size:12px;color:#8899b0;padding:4px 0">📁 {{ collections.find(c=>'c'+c.id===pfL3)?.name }} → 所有汇总{{ pfRange ? ' · '+pfDate+'~'+pfEnd : ' · 抽签'+pfItems[0]?.draw }}</div>
+        <table class="pf-table">
+          <thead><tr>
+            <th>汇总</th><th>项目</th>
+            <template v-if="pfRange"><th>日期</th><th>总结果</th></template>
+            <template v-else><th>联合49格值</th><th>排位</th><th>总结果</th></template>
+            <th>正负</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="it in pfItems" :key="'s'+it.id" class="pf-clickable" @click="pfL2='s'+it.id; onPfL2Change()">
+              <td style="font-weight:600">📊 {{ it.name }}</td>
+              <td>{{ it.project_count }}</td>
+              <template v-if="pfRange">
+                <td>{{ it.date }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+              </template>
+              <template v-else>
+                <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
+                <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+              </template>
+              <td class="pf-result" :class="{neg:(it.total_result||0)<0,pos:(it.total_result||0)>=0}">{{ (it.total_result||0)>=0?'✅ 正':'❌ 负' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- 记录组层：汇总→记录组列表 -->
+      <div v-if="pfItems.length && pfLevel==='run_groups'" class="pf-table-wrap card">
+        <div style="font-size:12px;color:#8899b0;padding:4px 0">📊 {{ pfSummaries.find(s=>'s'+s.id===pfL2)?.name }} → 所有记录组{{ pfRange ? ' · '+pfDate+'~'+pfEnd : ' · 抽签'+pfItems[0]?.draw }}</div>
+        <table class="pf-table">
+          <thead><tr>
+            <th>记录组</th><th>项目</th>
+            <template v-if="pfRange"><th>日期</th><th>总结果</th></template>
+            <template v-else><th>联合49格值</th><th>排位</th><th>总结果</th></template>
+            <th>正负</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="it in pfItems" :key="'rg'+it.id" class="pf-clickable" @click="pfL1='r'+it.id; onPfL1Change()">
+              <td style="font-weight:600">📋 {{ it.name }}</td>
+              <td>{{ it.project_count }}</td>
+              <template v-if="pfRange">
+                <td>{{ it.date }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+              </template>
+              <template v-else>
+                <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
+                <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+              </template>
+              <td class="pf-result" :class="{neg:(it.total_result||0)<0,pos:(it.total_result||0)>=0}">{{ (it.total_result||0)>=0?'✅ 正':'❌ 负' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- 项目层：记录组→项目明细 -->
+      <div v-if="pfItems.length && pfLevel==='projects'" class="pf-table-wrap card">
         <table class="pf-table">
           <thead><tr>
             <th>日期</th><th>项目</th><th>抽签</th><th>排位</th><th>对应值</th><th>累计</th><th>结果</th>
@@ -461,9 +541,9 @@
               <td>-</td>
               <td class="pf-result" :class="{neg:pfSummary.total_result<0,pos:pfSummary.total_result>=0}" style="font-weight:700">{{ pfSummary.total_result.toLocaleString() }}</td>
             </tr>
-            <tr v-for="it in pfItems" :key="it.date+it.project_id">
+            <tr v-for="it in pfItems" :key="it.date+it.id">
               <td>{{ it.date }}</td>
-              <td>{{ it.project_name }}</td>
+              <td>{{ it.name }}</td>
               <td style="color:#4da6ff;font-weight:700">{{ it.draw || '-' }}</td>
               <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
               <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
@@ -648,7 +728,7 @@
             各项目最新值 ({{ grid49.projects.length }}) {{ showGridProj ? '▼' : '▶' }}
           </div>
           <div v-if="showGridProj" class="g49-proj-list">
-            <div v-for="p in grid49.projects" :key="p.project_id" class="g49-proj-row">
+            <div v-for="p in grid49.projects" :key="p.project_id" class="g49-proj-row" @click="openProjGridFromG49(p)" style="cursor:pointer">
               <span>{{ p.project_name }}</span>
               <span style="font-size:11px;color:#8899b0">{{ p.last_date }}</span>
               <span class="g49-pv">¥{{ p.value.toLocaleString() }}</span>
@@ -667,6 +747,13 @@
         </div>
       </div>
       <div v-if="colSel && !sumSel">
+        <!-- 子标签：汇总/项目 -->
+        <div class="col-subtabs">
+          <span :class="{active:colSubTab==='summary'}" @click="colSubTab='summary'">📊 汇总</span>
+          <span :class="{active:colSubTab==='project'}" @click="colSubTab='project'">📁 项目</span>
+        </div>
+        <!-- 汇总列表 -->
+        <template v-if="colSubTab==='summary'">
         <div class="col-section-hd">
           <span class="col-section-tl">{{ colSel?.name }} · 汇总列表</span>
           <button class="btn-add-sm" @click="openAddSummary">+ 汇总</button>
@@ -685,6 +772,21 @@
           <button class="col-copy-btn" @click.stop="copyValue(s.total_value)" title="复制累计值">📋</button>
           <span class="col-card-arrow">›</span>
         </div>
+        </template>
+        <!-- 项目列表 -->
+        <template v-if="colSubTab==='project'">
+        <div class="col-section-hd">
+          <span class="col-section-tl">{{ colSel?.name }} · 项目列表</span>
+          <button class="btn-add-sm" @click="openAddColProject">+ 项目</button>
+        </div>
+        <div v-if="!colProjects.length" class="gs-empty">暂无项目，点击 + 创建</div>
+        <div v-for="p in colProjects" :key="'cp'+p.id" class="col-card" @click="selectProject(p.id); view='groupset'">
+          <div class="col-card-left">
+            <span class="col-card-name">📁 {{ p.name }}</span>
+          </div>
+          <span class="col-card-arrow">›</span>
+        </div>
+        </template>
       </div>
       <div v-if="sumSel && !rgSel">
         <div class="col-section-hd">
@@ -1007,6 +1109,11 @@ async function doDelete(id) {
 // ===== 组别设置 =====
 const projects = ref([])
 const selPid = ref(null)
+const gsColFilter = ref('')
+const gsSumFilter = ref('')
+const gsRgFilter = ref('')
+const gsScopeSummaries = ref([])
+const gsScopeRunGroups = ref([])
 const gsGroups = ref([])
 const showProjForm = ref(false)
 const editingProjId = ref(null)
@@ -1193,15 +1300,72 @@ async function delPeriod(pgid) {
   } catch (e) { console.error(e) }
 }
 
-async function loadProjects() {
+async function loadProjects(cid = null) {
   try {
-    const res = await fetch(`${API}/projects`)
+    const url = cid != null ? `${API}/projects?collection_id=${cid}` : `${API}/projects`
+    const res = await fetch(url)
     projects.value = await res.json()
     if (projects.value.length && !selPid.value) {
       selPid.value = projects.value[0].id
       loadGsGroups()
     }
   } catch (e) { console.error(e) }
+}
+
+async function onGsColChange() {
+  gsSumFilter.value = ''
+  gsScopeSummaries.value = []
+  if (gsColFilter.value) {
+    // 加载该集合的汇总列表
+    try {
+      const r = await fetch(`${API}/collections/${gsColFilter.value}/summaries`)
+      gsScopeSummaries.value = await r.json()
+    } catch(e) { gsScopeSummaries.value = [] }
+  }
+  loadProjects(gsColFilter.value || undefined)
+}
+
+async function onGsSumChange() {
+  gsRgFilter.value = ''
+  gsScopeRunGroups.value = []
+  if (gsSumFilter.value) {
+    // 加载该汇总的记录组列表
+    try {
+      const r = await fetch(`${API}/summaries/${gsSumFilter.value}/run-groups`)
+      gsScopeRunGroups.value = await r.json()
+    } catch(e) { gsScopeRunGroups.value = [] }
+    // 按汇总筛选项目
+    try {
+      const r = await fetch(`${API}/scope/projects?summary_id=${gsSumFilter.value}`)
+      const data = await r.json()
+      projects.value = data.map(p => ({ id: p.project_id, name: p.project_name }))
+      if (projects.value.length && !selPid.value) {
+        selPid.value = projects.value[0].id
+        loadGsGroups()
+      }
+    } catch(e) { console.error(e) }
+  } else {
+    // 回到集合级筛选
+    loadProjects(gsColFilter.value || undefined)
+  }
+}
+
+async function onGsRgChange() {
+  if (gsRgFilter.value) {
+    // 按记录组筛选项目
+    try {
+      const r = await fetch(`${API}/scope/projects?run_group_id=${gsRgFilter.value}`)
+      const data = await r.json()
+      projects.value = data.map(p => ({ id: p.project_id, name: p.project_name }))
+      if (projects.value.length && !selPid.value) {
+        selPid.value = projects.value[0].id
+        loadGsGroups()
+      }
+    } catch(e) { console.error(e) }
+  } else {
+    // 回到汇总级筛选
+    onGsSumChange()
+  }
 }
 
 function selectProject(pid) {
@@ -1225,6 +1389,12 @@ function openAddProject() {
   showProjForm.value = true
 }
 
+function openAddColProject() {
+  editingProjId.value = null
+  projForm.value = { name: '', collection_id: colSel.value?.id || null }
+  showProjForm.value = true
+}
+
 function editProjectName() {
   const p = projects.value.find(x => x.id === selPid.value)
   if (!p) return
@@ -1238,14 +1408,17 @@ async function saveProject() {
   try {
     const url = editingProjId.value ? `${API}/projects/${editingProjId.value}` : `${API}/projects`
     const method = editingProjId.value ? 'PUT' : 'POST'
+    const body = { name: projForm.value.name }
+    if (projForm.value.collection_id != null) body.collection_id = projForm.value.collection_id
     const res = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: projForm.value.name }),
+      body: JSON.stringify(body),
     })
     if (!res.ok) throw new Error((await res.json()).detail || '保存失败')
     showProjForm.value = false
     loadProjects()
+    if (colSel.value) loadColProjects(colSel.value.id)
   } catch (e) { alert(e.message) }
 }
 
@@ -1607,7 +1780,7 @@ async function delSimRun(runId) {
 }
 
 // ===== 数据分析 =====
-const anStart = ref('2020-03-01')
+const anStart = ref(new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10))
 const anEnd = ref(todayStr)
 const anProject = ref(null)
 const anPage = ref(1)
@@ -1651,6 +1824,8 @@ async function loadAnalysis() {
 // ===== 集合管理 =====
 const collections = ref([])
 const colSel = ref(null)
+const colSubTab = ref('summary')  // 'summary' | 'project'
+const colProjects = ref([])
 
 // 初始加载 + 切换时懒加载
 watch(view, (v) => {
@@ -1719,6 +1894,13 @@ async function loadCollections() {
   } catch (e) { console.error(e) }
 }
 
+async function loadColProjects(cid) {
+  try {
+    const res = await fetch(`${API}/projects?collection_id=${cid}`)
+    colProjects.value = await res.json()
+  } catch (e) { colProjects.value = [] }
+}
+
 async function loadAllSimRules() {
   try {
     const res = await fetch(`${API}/sim/rules`)
@@ -1779,8 +1961,8 @@ function backTo(level) {
 }
 
 function selectCollection(c) {
-  colSel.value = c; sumSel.value = null; rgSel.value = null
-  loadSummaries(c.id); loadGrid('collection', c.id)
+  colSel.value = c; sumSel.value = null; rgSel.value = null; colSubTab.value = 'summary'
+  loadSummaries(c.id); loadColProjects(c.id); loadGrid('collection', c.id)
 }
 
 function selectSummary(s) {
@@ -1931,6 +2113,18 @@ async function openProjGrid(it) {
   } catch (e) { $notify('打开失败: ' + e.message, true); showProjDetail.value = false }
 }
 
+async function openProjGridFromG49(p) {
+  projDetail.value = null
+  showProjDetail.value = true
+  try {
+    const dateParam = gridDate.value ? `?date=${gridDate.value}` : ''
+    const res = await fetch(`${API}/projects/${p.project_id}/grid${dateParam}`)
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '请求失败')
+    projDetail.value = data
+  } catch (e) { $notify('打开失败: ' + e.message, true); showProjDetail.value = false }
+}
+
 async function getActiveSimRunId(pid) {
   try {
     const res = await fetch(`${API}/sim/runs?project_id=${pid}`)
@@ -2001,11 +2195,13 @@ function openTodayRun() {
   trL3.value = 'all'; trL2.value = ''; trL1.value = ''
   scopeSummaries.value = []; scopeRunGroups.value = []; scopeProjects.value = []
   showTodayRun.value = true
+  // 初始即为全项目模式，手动触发加载
+  onTrL3Change()
 }
 
 async function onTrL3Change() {
   trL2.value = ''; trL1.value = ''; scopeRunGroups.value = []
-  if (trL3.value === 'all') { scopeSummaries.value = []; scopeProjects.value = []; return }
+  if (trL3.value === 'all') { scopeSummaries.value = []; await loadTrAllProjects(); return }
   const cid = parseInt(trL3.value.slice(1))
   try { const r = await fetch(`${API}/collections/${cid}/summaries`); scopeSummaries.value = await r.json() } catch(e) { scopeSummaries.value = [] }
   loadTrScopeProjects()
@@ -2019,6 +2215,28 @@ async function onTrL2Change() {
   loadTrScopeProjects()
 }
 async function onTrL1Change() { loadTrScopeProjects() }
+
+async function loadTrAllProjects() {
+  try {
+    const [pRes, rRes] = await Promise.all([
+      fetch(`${API}/projects`),
+      fetch(`${API}/sim/rules`),
+    ])
+    const projs = await pRes.json()
+    const rules = await rRes.json()
+    const byP = {}
+    for (const r of rules) {
+      if (!byP[r.project_id]) byP[r.project_id] = []
+      byP[r.project_id].push(r)
+    }
+    scopeProjects.value = projs.map(p => ({
+      project_id: p.id,
+      project_name: p.name,
+      rule_name: (byP[p.id] || [])[0]?.name || null,
+      rule_id: (byP[p.id] || [])[0]?.id || 0,
+    }))
+  } catch(e) { scopeProjects.value = [] }
+}
 
 async function loadTrScopeProjects() {
   const params = new URLSearchParams()
@@ -2056,6 +2274,20 @@ async function execTodayRun() {
     showTodayRun.value = false
   } catch (e) { $notify(e.message, true) }
   todayRunRunning.value = false
+}
+
+// ===== 一键清空模拟数据 =====
+async function clearAllSimData() {
+  if (!confirm('⚠️ 确认清空所有模拟运行数据？此操作不可恢复！')) return
+  try {
+    const res = await fetch(`${API}/sim/clear-all`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || '失败')
+    $notify('✅ ' + data.message)
+    // 刷新规则列表和查询
+    loadSimRules()
+    loadSimQuery()
+  } catch (e) { $notify(e.message, true) }
 }
 
 // ===== 共享范围工具 =====
@@ -2155,14 +2387,24 @@ const pfCID = computed(() => pfL3.value !== 'all')
 const pfSID = computed(() => pfCID.value && pfL2.value !== '')
 const pfSummaries = ref([]), pfRunGroups = ref([])
 const pfDate = ref(todayStr)
+const pfEnd = ref(todayStr)
+const pfRange = ref(false)
 const pfPage = ref(1), pfPages = ref(1)
 const pfItems = ref([])
 const pfSummary = ref(null)
+const pfLevel = ref('projects')
 const pfSearched = ref(false)
 
 async function loadProfit() {
   pfSearched.value = true
-  const params = new URLSearchParams({ date: pfDate.value, page: pfPage.value, page_size: '30' })
+  // 根据选中层级自动判断 level
+  let level = 'projects'
+  if (pfL3.value !== 'all' && !pfL2.value) level = 'summaries'
+  else if (pfL2.value && !pfL1.value) level = 'run_groups'
+  pfLevel.value = level
+  const params = new URLSearchParams({ level, page: pfPage.value, page_size: '30' })
+  if (pfRange.value) { params.set('start_date', pfDate.value); params.set('end_date', pfEnd.value) }
+  else params.set('date', pfDate.value)
   if (pfL1.value && pfL1.value.startsWith('r')) params.set('run_group_id', parseInt(pfL1.value.slice(1)))
   else if (pfL2.value && pfL2.value.startsWith('s')) params.set('summary_id', parseInt(pfL2.value.slice(1)))
   else if (pfL3.value !== 'all') params.set('collection_id', parseInt(pfL3.value.slice(1)))
@@ -2589,6 +2831,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 /* ===== 盈亏表格 ===== */
 .pf-summary { background: linear-gradient(135deg, #eef3ff, #f0f4f8); border-bottom: 2px solid #4da6ff; }
 .pf-summary td { padding: 10px 8px; }
+.pf-clickable { cursor: pointer; transition: background .15s; }
+.pf-clickable:hover { background: #f0f4f8; }
+.pf-clickable:active { background: #e8ecf1; }
 .profit-view { padding: 0 12px 40px; }
 .pf-table-wrap { overflow-x: auto; padding: 8px 4px; }
 .pf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -2600,4 +2845,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .pf-result.pos { color: #22c55e; }
 .pf-result.neg { color: #ee0a24; }
 .pf-table tbody tr:hover { background: #f8fafc; }
+.col-subtabs { display: flex; gap: 0; background: #f0f4f8; border-radius: 10px; padding: 3px; margin: 0 0 12px; }
+.col-subtabs span { flex: 1; text-align: center; padding: 8px 0; border-radius: 8px; font-size: 13px; font-weight: 600; color: #8899b0; cursor: pointer; transition: all .2s; }
+.col-subtabs span.active { background: #fff; color: #1a2a4a; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 </style>
