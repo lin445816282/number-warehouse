@@ -591,10 +591,12 @@ def get_record_years():
 
 class ProjectIn(BaseModel):
     name: str
+    collection_id: Optional[int] = None
 
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
+    collection_id: Optional[int] = None
 
 
 class GroupIn(BaseModel):
@@ -627,11 +629,17 @@ class PeriodGroupUpdate(BaseModel):
 
 
 @app.get("/api/projects")
-def list_projects():
+def list_projects(collection_id: Optional[int] = None):
     db = get_db()
-    rows = db.execute(
-        "SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY id"
-    ).fetchall()
+    if collection_id is not None:
+        rows = db.execute(
+            "SELECT * FROM projects WHERE deleted_at IS NULL AND collection_id=? ORDER BY id",
+            (collection_id,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY id"
+        ).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
@@ -639,7 +647,7 @@ def list_projects():
 @app.post("/api/projects")
 def create_project(p: ProjectIn):
     db = get_db()
-    db.execute("INSERT INTO projects (name) VALUES (?)", (p.name,))
+    db.execute("INSERT INTO projects (name, collection_id) VALUES (?,?)", (p.name, p.collection_id))
     db.commit()
     row = db.execute("SELECT * FROM projects WHERE rowid=last_insert_rowid()").fetchone()
     db.close()
@@ -654,7 +662,9 @@ def update_project(pid: int, p: ProjectUpdate):
         raise HTTPException(404, "项目不存在")
     if p.name is not None:
         db.execute("UPDATE projects SET name=? WHERE id=?", (p.name, pid))
-        db.commit()
+    if p.collection_id is not None:
+        db.execute("UPDATE projects SET collection_id=? WHERE id=?", (p.collection_id, pid))
+    db.commit()
     row = db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
     db.close()
     return {"ok": True, "project": dict(row)}
@@ -1111,7 +1121,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
 
     # === 检查已有运行，确定实际起止日期和初始状态 ===
     existing = db.execute(
-        "SELECT * FROM sim_runs WHERE rule_id=? AND project_id=? ORDER BY end_date DESC LIMIT 1",
+        "SELECT * FROM sim_runs WHERE rule_id=? AND project_id=? ORDER BY id DESC LIMIT 1",
         (rule_id, pid)
     ).fetchone()
 
@@ -1139,6 +1149,65 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         if rec["draw_number"] is not None and rec["draw_number"] != 0:
             records_by_date[rec["date"]] = rec["draw_number"]
 
+    # 同时查 snapshots 表补全（集合系统用 snapshots）
+    snapshots = db.execute(
+        "SELECT date, draw_number FROM snapshots WHERE date BETWEEN ? AND ? "
+        "AND draw_number IS NOT NULL AND draw_number > 0 ORDER BY date",
+        (start_date, end_date)
+    ).fetchall()
+    for snap in snapshots:
+        if snap["date"] not in records_by_date:
+            records_by_date[snap["date"]] = snap["draw_number"]
+
+    # === 向前查一天：取最后一次已知抽签，用于截断逻辑判断 ===
+    prev_record = db.execute(
+        "SELECT date, draw_number FROM records WHERE date < ? "
+        "AND draw_number IS NOT NULL AND draw_number > 0 "
+        "ORDER BY date DESC LIMIT 1",
+        (start_date,)
+    ).fetchone()
+    if prev_record:
+        records_by_date[prev_record["date"]] = prev_record["draw_number"]
+    if not prev_record:
+        prev_snap = db.execute(
+            "SELECT date, draw_number FROM snapshots WHERE date < ? "
+            "AND draw_number IS NOT NULL AND draw_number > 0 "
+            "ORDER BY date DESC LIMIT 1",
+            (start_date,)
+        ).fetchone()
+        if prev_snap:
+            records_by_date[prev_snap["date"]] = prev_snap["draw_number"]
+
+    # === 自动前推：请求起始在最新抽签之后 → 包含最新抽签日 ===
+    start_was_adjusted = False
+    if records_by_date:
+        max_record_date = max(records_by_date.keys())
+        if start_date > max_record_date:
+            start_was_adjusted = True
+            start_date = max_record_date
+            sd = dt_date.fromisoformat(start_date)
+            all_dates = []
+            d = sd
+            while d <= ed:
+                all_dates.append(d.isoformat())
+                d += timedelta(days=1)
+            # 补查新范围内的抽签记录
+            new_records = db.execute(
+                "SELECT date, draw_number FROM records WHERE date BETWEEN ? AND ? ORDER BY date",
+                (start_date, end_date)
+            ).fetchall()
+            for rec in new_records:
+                if rec["draw_number"] is not None and rec["draw_number"] != 0:
+                    records_by_date[rec["date"]] = rec["draw_number"]
+            new_snaps = db.execute(
+                "SELECT date, draw_number FROM snapshots WHERE date BETWEEN ? AND ? "
+                "AND draw_number IS NOT NULL AND draw_number > 0 ORDER BY date",
+                (start_date, end_date)
+            ).fetchall()
+            for snap in new_snaps:
+                if snap["date"] not in records_by_date:
+                    records_by_date[snap["date"]] = snap["draw_number"]
+
     # === 严格限制：end_date = 最新抽签日期 + 1天（只允许一天待开） ===
     if records_by_date:
         max_record_date = max(records_by_date.keys())
@@ -1152,26 +1221,39 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 all_dates.append(d.isoformat())
                 d += timedelta(days=1)
     elif existing:
-        # 完全没有新记录→保持已有范围，不扩展
-        end_date = existing["end_date"]
-        ed = dt_date.fromisoformat(end_date)
-        all_dates = []
-        d = sd
-        while d <= ed:
-            all_dates.append(d.isoformat())
-            d += timedelta(days=1)
+        # 完全没有新记录→已有范围≥请求起始才沿用，否则保持请求范围（允许往后一天预测）
+        if existing["end_date"] >= start_date:
+            end_date = existing["end_date"]
+            ed = dt_date.fromisoformat(end_date)
+            all_dates = []
+            d = sd
+            while d <= ed:
+                all_dates.append(d.isoformat())
+                d += timedelta(days=1)
+        # else: start_date > existing_end → 保持原始 all_dates（用户请求预测）
 
     if not all_dates:
         raise HTTPException(400, "无效日期范围")
 
-    if existing:
+    pending_days = []
+    if existing and (not start_was_adjusted or start_date >= existing["start_date"]):
         existing_end = existing["end_date"]
-        # 检查是否有待开奖的天需要更新
+        # 检查是否有待开奖的天需要更新（只对有抽签记录的日期，无抽签的"待开"不算pending避免死循环）
         pending_days = []
         if end_date <= existing_end:
+            # 查最大有抽签日期（已开奖），无抽签的"待开"日不算pending避免死循环
+            max_draw = db.execute(
+                "SELECT MAX(date) FROM ("
+                "SELECT MAX(date) as date FROM records WHERE draw_number IS NOT NULL AND draw_number>0 "
+                "UNION ALL "
+                "SELECT MAX(date) FROM snapshots WHERE draw_number IS NOT NULL AND draw_number>0"
+                ")"
+            ).fetchone()
+            max_draw_date = max_draw[0] if max_draw and max_draw[0] else "0000-01-01"
             pending_days = db.execute(
-                "SELECT DISTINCT date FROM sim_results WHERE run_id=? AND hit_group IS NULL AND date BETWEEN ? AND ?",
-                (existing["id"], start_date, end_date)
+                "SELECT DISTINCT date FROM sim_results WHERE run_id=? AND hit_group IS NULL "
+                "AND date BETWEEN ? AND ? AND date <= ?",
+                (existing["id"], start_date, end_date, max_draw_date)
             ).fetchall()
         if not pending_days and end_date <= existing_end:
             return {
@@ -1441,12 +1523,15 @@ def run_simulation_endpoint(body: SimRunRequest):
     db = get_db()
     results = []
     try:
+        all_skipped = True
         for i, pid in enumerate(body.project_ids):
             rid = body.rule_ids[min(i, len(body.rule_ids) - 1)]
             r = run_simulation(db, rid, body.start_date, body.end_date, pid)
             results.append(r)
-        # 模拟完成后刷新分析数据
-        refresh_analysis(db)
+            if not r.get("skipped"):
+                all_skipped = False
+        if not all_skipped:
+            refresh_analysis(db)
         # 返回最后一条的run_id给前端默认展示
         last = results[-1] if results else None
         return {"ok": True, "runs": results, "last_run_id": last["run_id"] if last else None}
@@ -1525,6 +1610,19 @@ def delete_sim_run(run_id: int):
     db.close()
     return {"ok": True}
 
+
+@app.delete("/api/sim/clear-all")
+def clear_all_sim_data():
+    """一键清空所有模拟数据（sim_runs + sim_results）"""
+    db = get_db()
+    try:
+        db.execute("DELETE FROM sim_results")
+        db.execute("DELETE FROM sim_runs")
+        db.execute("DELETE FROM sqlite_sequence WHERE name IN ('sim_runs','sim_results')")
+        db.commit()
+        return {"ok": True, "message": "已清空所有模拟运行数据"}
+    finally:
+        db.close()
 
 # ==================== 次数映射值 ====================
 
@@ -2005,18 +2103,19 @@ def _refresh_run_group_stats(db, rg_id: int):
 
 
 def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
-    """给定项目ID列表，聚合 49 格。target_date 指定日期，不传则取最新日"""
+    """给定项目ID列表，聚合 49 格。target_date 指定日期，不传则取最新日。批量查询优化版"""
     value_map = get_count_map_dict(db)
     if not project_ids:
         return {"last_date": "", "grid": [], "projects": []}
 
     p = ",".join("?" * len(project_ids))
 
-    # 每个项目取最新一条 sim_run
+    # 1) 批量取每个项目最新 sim_run（用子查询找最大id）
     run_rows = db.execute(
         f"SELECT srn.id, srn.project_id, srn.project_name, srn.hit_count, srn.total_days "
-        f"FROM sim_runs srn WHERE srn.project_id IN ({p}) "
-        f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id=srn.project_id) "
+        f"FROM sim_runs srn "
+        f"JOIN (SELECT project_id, MAX(id) as max_id FROM sim_runs WHERE project_id IN ({p}) GROUP BY project_id) mx "
+        f"ON srn.project_id=mx.project_id AND srn.id=mx.max_id "
         f"ORDER BY srn.project_id",
         project_ids
     ).fetchall()
@@ -2026,7 +2125,9 @@ def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
 
     run_ids = [r["id"] for r in run_rows]
     rp = ",".join("?" * len(run_ids))
+    run_by_pid = {r["project_id"]: r for r in run_rows}
 
+    # 2) 确定 use_date
     if target_date:
         use_date = target_date
     else:
@@ -2035,50 +2136,47 @@ def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
         ).fetchone()
         use_date = last["dt"] or ""
 
-    # 各项目指定日期的值
+    # 3) 批量查所有 sim_results（一次查询替代逐条查询）
+    sim_rows = []
+    if use_date:
+        sim_rows = db.execute(
+            f"SELECT run_id, date, hit_group, group_name, count_n, numbers_json "
+            f"FROM sim_results WHERE run_id IN ({rp}) AND date=?",
+            run_ids + [use_date]
+        ).fetchall()
+
+    # 按 run_id 分组
+    from collections import defaultdict
+    by_run = defaultdict(list)
+    for sr in sim_rows:
+        by_run[sr["run_id"]].append(sr)
+
+    # 4) 一次遍历构建 projects + 49格
     projects = []
+    grid = {n: 0 for n in range(1, 50)}
     for pr in run_rows:
-        day = db.execute(
-            "SELECT date, hit_group FROM sim_results WHERE run_id=? AND date=? LIMIT 1",
-            (pr["id"], use_date)
-        ).fetchone()
+        groups = by_run.get(pr["id"], [])
         proj_val = 0
-        if day:
-            groups = db.execute(
-                "SELECT group_name, count_n, numbers_json FROM sim_results WHERE run_id=? AND date=?",
-                (pr["id"], day["date"])
-            ).fetchall()
-            for g in groups:
-                nums = json.loads(g["numbers_json"])
-                proj_val += value_map.get(g["count_n"], 0) * len(nums)
+        hit_group = ""
+        for g in groups:
+            nums = json.loads(g["numbers_json"])
+            val = value_map.get(g["count_n"], 0)
+            proj_val += val * len(nums)
+            for n in nums:
+                grid[n] = grid.get(n, 0) + val
+            if not hit_group:
+                hit_group = g["hit_group"] or ""
         projects.append({
             "project_id": pr["project_id"], "project_name": pr["project_name"],
-            "last_date": day["date"] if day else (use_date if target_date else ""),
-            "hit_group": day["hit_group"] if day else "",
+            "last_date": use_date if groups else (use_date if target_date else ""),
+            "hit_group": hit_group,
             "value": proj_val,
             "hit_count": pr["hit_count"], "total_days": pr["total_days"],
         })
 
-    # 49格
-    grid = {n: 0 for n in range(1, 50)}
-    for pr in run_rows:
-        day = db.execute(
-            "SELECT date FROM sim_results WHERE run_id=? AND date=? LIMIT 1",
-            (pr["id"], use_date)
-        ).fetchone()
-        if not day: continue
-        groups = db.execute(
-            "SELECT group_name, count_n, numbers_json FROM sim_results WHERE run_id=? AND date=?",
-            (pr["id"], use_date)
-        ).fetchall()
-        for g in groups:
-            nums = json.loads(g["numbers_json"])
-            val = value_map.get(g["count_n"], 0)
-            for n in nums:
-                grid[n] = grid.get(n, 0) + val
-
     grid_list = [{"n": n, "value": grid[n]} for n in range(1, 50)]
-    # 补全项目
+
+    # 5) 补全项目（无 sim_run 的项目）
     proj_miss = db.execute(
         f"SELECT id, name FROM projects WHERE id IN ({p}) AND deleted_at IS NULL", project_ids
     ).fetchall()
@@ -2109,6 +2207,24 @@ def get_run_group_grid(rgid: int, date: str = None):
     return result
 
 
+@app.get("/api/projects/{pid}/grid")
+def get_project_grid(pid: int, date: str = None):
+    """单项目: 49格明细（点查询用）"""
+    db = get_db()
+    result = _build_49_grid(db, [pid], date)
+    proj = result["projects"][0] if result["projects"] else {}
+    grid = result.get("grid", [])
+    total = sum(g["value"] for g in grid)
+    db.close()
+    return {
+        "project_name": proj.get("project_name", ""),
+        "last_date": result.get("last_date", ""),
+        "total": total,
+        "draw_number": result.get("draw_number"),
+        "grid": grid,
+    }
+
+
 @app.get("/api/summaries/{sid}/grid")
 def get_summary_grid(sid: int, date: str = None):
     """汇总: 49值聚合(跨所有记录组)"""
@@ -2126,15 +2242,10 @@ def get_summary_grid(sid: int, date: str = None):
 
 @app.get("/api/collections/{cid}/grid")
 def get_collection_grid(cid: int, date: str = None):
-    """集合: 49值聚合(跨所有汇总)"""
+    """集合: 49值聚合(所有项目)"""
     db = get_db()
-    items = db.execute(
-        "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
-        "JOIN run_groups rg ON rgi.run_group_id=rg.id "
-        "JOIN summaries s ON rg.summary_id=s.id "
-        "WHERE s.collection_id=?", (cid,)
-    ).fetchall()
-    ids = [i["project_id"] for i in items]
+    items = db.execute("SELECT id FROM projects WHERE deleted_at IS NULL").fetchall()
+    ids = [i["id"] for i in items]
     result = _build_49_grid(db, ids, date)
     db.close()
     return result
@@ -2192,6 +2303,55 @@ def delete_run_group(rgid: int):
     db.execute("DELETE FROM run_group_items WHERE run_group_id=?", (rgid,))
     db.execute("DELETE FROM run_group_stats WHERE run_group_id=?", (rgid,))
     db.execute("DELETE FROM run_groups WHERE id=?", (rgid,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+class RunGroupItemAdd(BaseModel):
+    project_id: int
+    sim_run_id: int = 0
+    rule_id: int = 0
+
+
+@app.post("/api/run-groups/{rgid}/items")
+def add_run_group_item(rgid: int, body: RunGroupItemAdd):
+    """添加单个项目到记录组"""
+    db = get_db()
+    rg = db.execute("SELECT * FROM run_groups WHERE id=?", (rgid,)).fetchone()
+    if not rg:
+        db.close()
+        raise HTTPException(404, "记录组不存在")
+    existing = db.execute(
+        "SELECT id FROM run_group_items WHERE run_group_id=? AND project_id=?", (rgid, body.project_id)
+    ).fetchone()
+    if existing:
+        db.close()
+        raise HTTPException(400, "项目已在记录组中")
+    proj_name = db.execute("SELECT name FROM projects WHERE id=? AND deleted_at IS NULL", (body.project_id,)).fetchone()
+    proj_name = proj_name["name"] if proj_name else f"项目{body.project_id}"
+    db.execute(
+        "INSERT INTO run_group_items (run_group_id, sim_run_id, project_id, project_name) VALUES (?,?,?,?)",
+        (rgid, body.sim_run_id, body.project_id, proj_name)
+    )
+    _link_existing_sim_runs(db, rgid)
+    _refresh_run_group_stats(db, rgid)
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.delete("/api/run-group-items/{item_id}")
+def delete_run_group_item(item_id: int):
+    """删除记录组中的单个项目"""
+    db = get_db()
+    item = db.execute("SELECT * FROM run_group_items WHERE id=?", (item_id,)).fetchone()
+    if not item:
+        db.close()
+        raise HTTPException(404, "项目不存在")
+    rgid = item["run_group_id"]
+    db.execute("DELETE FROM run_group_items WHERE id=?", (item_id,))
+    _refresh_run_group_stats(db, rgid)
     db.commit()
     db.close()
     return {"ok": True}
@@ -2345,13 +2505,284 @@ def get_scope_daily(
     summary_id: Optional[int] = Query(None),
     run_group_id: Optional[int] = Query(None),
     date: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    level: str = "projects",  # projects | run_groups | summaries
+    expand: bool = False,
     page: int = 1,
     page_size: int = 30,
 ):
-    """按范围取单日盈亏明细：日期/项目/抽签/排位/对应值/累计/结果"""
-    if not date:
-        date = dt_date.today().isoformat()
+    """按范围取盈亏明细，支持单日/时间段，三级钻取；expand=true 时返回树形嵌套"""
+    # 模式判断
+    is_range = bool(start_date and end_date)
+    if is_range:
+        date_filter = "date BETWEEN ? AND ?"
+        date_params = [start_date, end_date]
+    else:
+        date_filter = "date = ?"
+        date_params = [date]
     db = get_db()
+
+    # ==================== 展开模式：树形嵌套 ====================
+    if expand and is_range and collection_id:
+        value_map = get_count_map_dict(db)
+        # 查该集合下所有汇总
+        summaries = db.execute(
+            "SELECT id, name FROM summaries WHERE collection_id=?", (collection_id,)
+        ).fetchall()
+        result = []
+        for srow in summaries:
+            sid = srow["id"]
+            # 该汇总下所有记录组
+            rgs = db.execute(
+                "SELECT id, name FROM run_groups WHERE summary_id=?", (sid,)
+            ).fetchall()
+            rg_list = []
+            for rgrow in rgs:
+                rgid = rgrow["id"]
+                # 该记录组下所有项目
+                projs = db.execute("""
+                    SELECT p.id, p.name, rgi.id as item_id
+                    FROM run_group_items rgi
+                    JOIN projects p ON p.id = rgi.project_id
+                    WHERE rgi.run_group_id = ? AND p.deleted_at IS NULL
+                """, (rgid,)).fetchall()
+                proj_list = []
+                for prow in projs:
+                    pid = prow["id"]
+                    # 项目在该时间段的分析数据
+                    ad_rows = db.execute(
+                        f"SELECT draw_number, value, cumulative_sum, result, date FROM analysis_daily WHERE project_id=? AND {date_filter} ORDER BY date",
+                        [pid] + date_params
+                    ).fetchall()
+                    results = [r["result"] for r in ad_rows]
+                    proj_list.append({
+                        "name": prow["name"],
+                        "id": pid,
+                        "item_id": prow["item_id"],
+                        "days": len(ad_rows),
+                        "total_result": sum(results),
+                        "pos_days": sum(1 for r in results if r > 0),
+                        "neg_days": sum(1 for r in results if r < 0),
+                        "daily": [{"date": r["date"], "draw": r["draw_number"],
+                                   "value": r["value"], "cumulative": r["cumulative_sum"],
+                                   "result": r["result"]} for r in ad_rows],
+                    })
+                if not proj_list: continue
+                # 记录组汇总
+                rg_results = [r for p in proj_list for r in [p["total_result"]]]
+                rg_list.append({
+                    "name": rgrow["name"],
+                    "id": rgid,
+                    "project_count": len(proj_list),
+                    "days": proj_list[0]["days"] if proj_list else 0,
+                    "total_result": sum(p["total_result"] for p in proj_list),
+                    "pos_days": sum(p["pos_days"] for p in proj_list),
+                    "neg_days": sum(p["neg_days"] for p in proj_list),
+                    "projects": proj_list,
+                })
+            if not rg_list: continue
+            result.append({
+                "name": srow["name"],
+                "id": sid,
+                "type": "summary",
+                "project_count": sum(r["project_count"] for r in rg_list),
+                "days": rg_list[0]["days"] if rg_list else 0,
+                "total_result": sum(r["total_result"] for r in rg_list),
+                "pos_days": sum(r["pos_days"] for r in rg_list),
+                "neg_days": sum(r["neg_days"] for r in rg_list),
+                "run_groups": rg_list,
+            })
+        db.close()
+        return {"trees": result, "is_range": True, "expand": True}
+
+    # ==================== 第一层：集合 → 汇总列表 ====================
+    if level == "summaries" and collection_id:
+        value_map = get_count_map_dict(db)
+        # 查该集合下所有汇总
+        summaries = db.execute("""
+            SELECT s.id, s.name
+            FROM summaries s WHERE s.collection_id = ?
+        """, (collection_id,)).fetchall()
+        items = []
+        for srow in summaries:
+            sid = srow["id"]
+            # 获取该汇总下所有 project_id
+            pids_rows = db.execute("""
+                SELECT DISTINCT rgi.project_id
+                FROM run_group_items rgi
+                JOIN run_groups rg ON rgi.run_group_id = rg.id
+                WHERE rg.summary_id = ?
+            """, (sid,)).fetchall()
+            spids = [r["project_id"] for r in pids_rows]
+            if not spids: continue
+
+            spids_sql = ','.join('?' * len(spids))
+            if is_range:
+                # ===== 范围模式：按天分行 =====
+                daily_rows = db.execute(
+                    f"SELECT date, COUNT(*) as cnt, COALESCE(SUM(value),0) as tv, COALESCE(SUM(result),0) as tr FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter} GROUP BY date ORDER BY date",
+                    spids + date_params
+                ).fetchall()
+                for dr in daily_rows:
+                    items.append({
+                        "name": srow["name"],
+                        "type": "summary",
+                        "id": sid,
+                        "date": dr["date"],
+                        "project_count": len(spids),
+                        "total_value": dr["tv"] or 0,
+                        "total_result": dr["tr"] or 0,
+                        "rank": None,
+                    })
+                continue
+
+            # ===== 单日模式 =====
+            # 取 draw_number
+            dr = db.execute(
+                f"SELECT draw_number FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter} LIMIT 1",
+                spids + date_params
+            ).fetchone()
+            draw = dr["draw_number"] if dr else None
+
+            # 聚合 analysis_daily
+            agg = db.execute(
+                f"SELECT COUNT(*) as cnt, COALESCE(SUM(value),0) as tv, COALESCE(SUM(result),0) as tr FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter}",
+                spids + date_params
+            ).fetchone()
+
+            # 构建联合 49 格：汇总所有项目的 sim_results
+            grid = {n: 0 for n in range(1, 50)}
+            for pid in spids:
+                rid_row = db.execute(
+                    "SELECT id FROM sim_runs WHERE project_id=? ORDER BY id DESC LIMIT 1", (pid,)
+                ).fetchone()
+                if not rid_row: continue
+                groups = db.execute(
+                    f"SELECT numbers_json, count_n FROM sim_results WHERE run_id=? AND {date_filter}",
+                    (rid_row["id"],) + tuple(date_params)
+                ).fetchall()
+                for g in groups:
+                    nums = json.loads(g["numbers_json"])
+                    val = value_map.get(g["count_n"], 0)
+                    for n in nums:
+                        grid[n] = grid.get(n, 0) + val
+
+            # 抽签排位（按1-49全格，不剔零不剔重）
+            draw_val = grid.get(draw, 0) if draw else 0
+            rank = None
+            if draw and grid and draw_val > 0:
+                vals = sorted(grid.values(), reverse=True)
+                if draw_val in vals:
+                    rank = vals.index(draw_val) + 1
+
+            items.append({
+                "name": srow["name"],
+                "type": "summary",
+                "id": sid,
+                "project_count": agg["cnt"] or 0,
+                "draw": draw,
+                "draw_value": draw_val,
+                "total_value": agg["tv"] or 0,
+                "total_result": agg["tr"] or 0,
+                "rank": rank,
+            })
+        # 按联合 49 格排位排序
+        items.sort(key=lambda x: (x["rank"] or 999))
+        db.close()
+        return {"items": items, "total": len(items), "page": 1, "total_pages": 1, "level": level, "is_range": is_range}
+
+    # ==================== 第二层：汇总 → 记录组列表 ====================
+    if level == "run_groups" and summary_id:
+        value_map = get_count_map_dict(db)
+        # 查该汇总下所有记录组
+        rgs = db.execute("""
+            SELECT rg.id, rg.name FROM run_groups rg WHERE rg.summary_id = ?
+        """, (summary_id,)).fetchall()
+        items = []
+        for rgrow in rgs:
+            rgid = rgrow["id"]
+            # 获取该记录组下所有 project_id
+            pids_rows = db.execute("""
+                SELECT project_id FROM run_group_items WHERE run_group_id = ?
+            """, (rgid,)).fetchall()
+            spids = [r["project_id"] for r in pids_rows]
+            if not spids: continue
+
+            spids_sql = ','.join('?' * len(spids))
+            if is_range:
+                daily_rows = db.execute(
+                    f"SELECT date, COUNT(*) as cnt, COALESCE(SUM(value),0) as tv, COALESCE(SUM(result),0) as tr FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter} GROUP BY date ORDER BY date",
+                    spids + date_params
+                ).fetchall()
+                for dr in daily_rows:
+                    items.append({
+                        "name": rgrow["name"],
+                        "type": "run_group",
+                        "id": rgid,
+                        "date": dr["date"],
+                        "project_count": len(spids),
+                        "total_value": dr["tv"] or 0,
+                        "total_result": dr["tr"] or 0,
+                        "rank": None,
+                    })
+                continue
+
+            # 取 draw_number
+            dr = db.execute(
+                f"SELECT draw_number FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter} LIMIT 1",
+                spids + date_params
+            ).fetchone()
+            draw = dr["draw_number"] if dr else None
+
+            # 聚合 analysis_daily
+            agg = db.execute(
+                f"SELECT COUNT(*) as cnt, COALESCE(SUM(value),0) as tv, COALESCE(SUM(result),0) as tr FROM analysis_daily WHERE project_id IN ({spids_sql}) AND {date_filter}",
+                spids + date_params
+            ).fetchone()
+
+            # 构建联合 49 格
+            grid = {n: 0 for n in range(1, 50)}
+            for pid in spids:
+                rid_row = db.execute(
+                    "SELECT id FROM sim_runs WHERE project_id=? ORDER BY id DESC LIMIT 1", (pid,)
+                ).fetchone()
+                if not rid_row: continue
+                groups = db.execute(
+                    f"SELECT numbers_json, count_n FROM sim_results WHERE run_id=? AND {date_filter}",
+                    (rid_row["id"],) + tuple(date_params)
+                ).fetchall()
+                for g in groups:
+                    nums = json.loads(g["numbers_json"])
+                    val = value_map.get(g["count_n"], 0)
+                    for n in nums:
+                        grid[n] = grid.get(n, 0) + val
+
+            # 抽签排位（按1-49全格，不剔零不剔重）
+            draw_val = grid.get(draw, 0) if draw else 0
+            rank = None
+            if draw and grid and draw_val > 0:
+                vals = sorted(grid.values(), reverse=True)
+                if draw_val in vals:
+                    rank = vals.index(draw_val) + 1
+
+            items.append({
+                "name": rgrow["name"],
+                "type": "run_group",
+                "id": rgid,
+                "project_count": agg["cnt"] or 0,
+                "draw": draw,
+                "draw_value": draw_val,
+                "total_value": agg["tv"] or 0,
+                "total_result": agg["tr"] or 0,
+                "rank": rank,
+            })
+        # 按联合 49 格排位排序
+        items.sort(key=lambda x: (x["rank"] or 999))
+        db.close()
+        return {"items": items, "total": len(items), "page": 1, "total_pages": 1, "level": level}
+
+    # ==================== 第三层：项目明细（原有逻辑） ====================
     # 解析范围→project_ids
     if run_group_id:
         rows = db.execute("SELECT project_id FROM run_group_items WHERE run_group_id=?", (run_group_id,)).fetchall()
@@ -2370,7 +2801,7 @@ def get_scope_daily(
     pids = [r["project_id"] for r in rows]
     if not pids:
         db.close()
-        return {"items": [], "total": 0, "page": 1, "total_pages": 0}
+        return {"items": [], "total": 0, "page": 1, "total_pages": 0, "level": "projects", "is_range": is_range}
 
     # count→value 映射
     value_map = get_count_map_dict(db)
@@ -2383,15 +2814,15 @@ def get_scope_daily(
     ).fetchall()
     run_by_pid = {r["project_id"]: r["id"] for r in runs}
 
-    # 查 analysis_daily（单日）
-    where = "WHERE project_id IN ({}) AND date = ?".format(pids_sql)
+    # 查 analysis_daily
+    where = f"WHERE project_id IN ({pids_sql}) AND {date_filter}"
     total = db.execute(
-        f"SELECT COUNT(*) FROM analysis_daily {where}", pids + [date]
+        f"SELECT COUNT(*) FROM analysis_daily {where}", pids + date_params
     ).fetchone()[0]
     offset = (page - 1) * page_size
     daily_rows = db.execute(
         f"SELECT * FROM analysis_daily {where} ORDER BY date DESC, project_id LIMIT ? OFFSET ?",
-        pids + [date, page_size, offset]
+        pids + date_params + [page_size, offset]
     ).fetchall()
 
     # 预加载本页需要用到的 sim_results（按 run_id + date 批量取，仅用于排位计算）
@@ -2413,22 +2844,23 @@ def get_scope_daily(
                 val = value_map.get(g["count_n"], 0)
                 for n in nums:
                     grid[n] = grid.get(n, 0) + val
-        # 排位：抽签数在 49 格中的值排名
+        # 抽签排位（按1-49全格，不剔零不剔重）
         draw_val = grid.get(draw, 0) if draw else 0
         rank = None
         if draw and grid and draw_val > 0:
-            vals = sorted(set(v for v in grid.values() if v > 0), reverse=True)
+            vals = sorted(grid.values(), reverse=True)
             if draw_val in vals:
                 rank = vals.index(draw_val) + 1
         items.append({
+            "name": r["project_name"],
+            "type": "project",
+            "id": pid,
             "date": dt,
-            "project_id": pid,
-            "project_name": r["project_name"],
             "draw": draw,
             "rank": rank,
-            "draw_value": r["value"],       # DB 已存的命中值
-            "cumulative": r["cumulative_sum"],  # 累计净收益
-            "result": r["result"],           # 当日净收益（DB 已算好）
+            "draw_value": r["value"],
+            "cumulative": r["cumulative_sum"],
+            "result": r["result"],
         })
     db.close()
     # 计算当前范围的汇总（全量，不受分页影响）
@@ -2436,8 +2868,8 @@ def get_scope_daily(
     if pids:
         agg_db = get_db()
         agg_row = agg_db.execute(
-            f"SELECT COUNT(*) as cnt, SUM(value) as tv, SUM(result) as tr FROM analysis_daily WHERE project_id IN ({pids_sql}) AND date = ?",
-            pids + [date]
+            f"SELECT COUNT(DISTINCT project_id) as cnt, SUM(value) as tv, SUM(result) as tr FROM analysis_daily WHERE project_id IN ({pids_sql}) AND {date_filter}",
+            pids + date_params
         ).fetchone()
         if agg_row:
             agg["project_count"] = agg_row["cnt"] or 0
@@ -2450,6 +2882,8 @@ def get_scope_daily(
         "page": page,
         "total_pages": max(1, (total + page_size - 1) // page_size),
         "summary": agg,
+        "level": "projects",
+        "is_range": is_range,
     }
 
 
