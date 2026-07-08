@@ -17,6 +17,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .amount-box { background:linear-gradient(135deg,#1a73e8,#0d47a1); color:#fff; border-radius:12px; padding:18px; text-align:center; margin:8px 0 12px; }
 .amount-box .label { font-size:12px; opacity:.8; }
 .amount-box .value { font-size:30px; font-weight:700; margin-top:2px; }
+.filter-bar { display:flex; align-items:center; gap:6px; padding:8px 0; flex-wrap:wrap; }
+.filter-label { font-size:12px; color:#888; white-space:nowrap; }
+.filter-chip { display:inline-flex; align-items:center; gap:3px; padding:3px 10px; border-radius:14px; font-size:12px; background:#f0f0f0; cursor:pointer; user-select:none; border:1px solid transparent; }
+.filter-chip:has(input:checked) { background:#e3f2fd; border-color:#90caf9; color:#1565c0; }
+.filter-chip input { display:none; }
 .btn-collect { width:100%; padding:12px; background:#4caf50; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; margin:8px 0; cursor:pointer; }
 .btn-collect:active { opacity:.8; }
 .btn-collect:disabled { background:#aaa; }
@@ -60,7 +65,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </head>
 <body>
 
-<div class="header"><div class="title">📊 每日汇总</div></div>
+<div class="header">
+  <div style="display:flex;justify-content:center;gap:6px;align-items:center">
+    <select id="collSelect" onchange="switchColl()" style="padding:4px 10px;border:1px solid #d0d5dd;border-radius:6px;font-size:14px;margin-right:4px">
+      <option value="19">A级集合 (汇总1-6)</option>
+      <option value="14">日汇总1-4</option>
+      <option value="16">日汇总1-6</option>
+    </select>
+    <div class="title">📊 每日汇总</div>
+  </div>
+</div>
 <div class="date-info" id="dateInfo">--</div>
 <div class="day-seq" id="daySeq"></div>
 
@@ -70,8 +84,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <div class="amount-box">
-  <div class="label">当日总额</div>
+  <div class="label">累计总额</div>
   <div class="value" id="dailyAmount">--</div>
+</div>
+
+<div class="filter-bar" id="filterBar">
+  <span class="filter-label">汇总筛选</span>
 </div>
 
 <button class="btn-collect" onclick="collectData()" id="btnCollect">📸 采集当日全量数据</button>
@@ -93,7 +111,49 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <script>
 const API = 'api/export';
-const CID = 19;
+const urlParams = new URLSearchParams(window.location.search);
+const CID = parseInt(urlParams.get('cid')) || 19;
+let _summariesData = [];
+let _collName = '';
+
+// 加载集合信息 → 动态构建筛选芯片
+async function initCollection() {
+  try {
+    const resp = await fetch(API + '/collection-info?collection_id=' + CID);
+    const data = await resp.json();
+    _collName = data.collection_name;
+    document.querySelector('.title').textContent = '📊 ' + _collName;
+    // 同步下拉框
+    document.getElementById('collSelect').value = CID;
+    // 动态构建 filter chips
+    const bar = document.getElementById('filterBar');
+    bar.innerHTML = '<span class="filter-label">汇总筛选</span>';
+    data.summaries.forEach((s, i) => {
+      const label = document.createElement('label');
+      label.className = 'filter-chip';
+      label.id = 'chip' + (i+1);
+      label.innerHTML = '<input type="checkbox" checked onchange="onFilterChange()" data-name="'+s.name+'">' + s.name;
+      bar.appendChild(label);
+    });
+    // 默认全选中，初始累计需要等 loadData 后再算
+  } catch(e) {
+    console.error('加载集合信息失败', e);
+  }
+}
+
+function switchColl() {
+  const newCID = document.getElementById('collSelect').value;
+  window.location.search = '?cid=' + newCID;
+}
+
+// 筛选变化 → 重算累计
+function onFilterChange() {
+  const checked = new Set();
+  document.querySelectorAll('.filter-chip input:checked').forEach(cb => checked.add(cb.dataset.name));
+  let total = 0;
+  _summariesData.forEach(s => { if (checked.has(s.name)) total += (s.total_value || 0); });
+  document.getElementById('dailyAmount').textContent = total.toLocaleString();
+}
 
 // 默认取最新快照日期
 async function initDefaultDate() {
@@ -124,7 +184,8 @@ async function loadData() {
     
     document.getElementById('dateInfo').textContent = sumData.date + '  ·  抽签数' + (sumData.draw_number || '-');
     document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
-    document.getElementById('dailyAmount').textContent = (sumData.daily_amount || 0).toLocaleString();
+    _summariesData = sumData.summaries || [];
+    onFilterChange();  // 按筛选重算累计
     
     if (!sumData.summaries || sumData.summaries.length === 0) {
       document.getElementById('cardList').innerHTML = '<div class="empty">暂无数据，请先采集</div>';
@@ -246,7 +307,9 @@ async function saveCron() {
 
 // 初始化
 loadCron();
-initDefaultDate().then(function(d) {
+initCollection().then(function() {
+  return initDefaultDate();
+}).then(function(d) {
   document.getElementById('dateInput').value = d;
   loadData();
 });
