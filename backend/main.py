@@ -647,7 +647,31 @@ def list_projects(collection_id: Optional[int] = None):
 @app.post("/api/projects")
 def create_project(p: ProjectIn):
     db = get_db()
-    db.execute("INSERT INTO projects (name, collection_id) VALUES (?,?)", (p.name, p.collection_id))
+    # 同名项目 → 原地复用（优先活跃，其次已删除），防止ID漂移导致汇总孤儿
+    cid = p.collection_id
+    if cid:
+        existing = db.execute(
+            "SELECT id, deleted_at FROM projects WHERE name=? AND collection_id=? "
+            "ORDER BY deleted_at IS NULL DESC, id ASC LIMIT 1",
+            (p.name, cid)
+        ).fetchone()
+    else:
+        existing = db.execute(
+            "SELECT id, deleted_at FROM projects WHERE name=? AND collection_id IS NULL "
+            "ORDER BY deleted_at IS NULL DESC, id ASC LIMIT 1",
+            (p.name,)
+        ).fetchone()
+
+    if existing:
+        pid = existing["id"]
+        if existing["deleted_at"]:
+            db.execute("UPDATE projects SET deleted_at=NULL WHERE id=?", (pid,))
+        db.commit()
+        row = db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        db.close()
+        return {"ok": True, "project": dict(row), "reused": True}
+
+    db.execute("INSERT INTO projects (name, collection_id) VALUES (?,?)", (p.name, cid))
     db.commit()
     row = db.execute("SELECT * FROM projects WHERE rowid=last_insert_rowid()").fetchone()
     db.close()
@@ -1180,6 +1204,9 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
 
     # === 自动前推：请求起始在最新抽签之后 → 包含最新抽签日 ===
     start_was_adjusted = False
+    end_was_adjusted = False
+    req_start_date = start_date  # 记录原始请求
+    req_end_date = end_date
     if records_by_date:
         max_record_date = max(records_by_date.keys())
         if start_date > max_record_date:
@@ -1213,13 +1240,7 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         max_record_date = max(records_by_date.keys())
         max_allowed = (dt_date.fromisoformat(max_record_date) + timedelta(days=1)).isoformat()
         if max_allowed < end_date:
-            end_date = max_allowed
-            ed = dt_date.fromisoformat(end_date)
-            all_dates = []
-            d = sd
-            while d <= ed:
-                all_dates.append(d.isoformat())
-                d += timedelta(days=1)
+            raise HTTPException(400, f"只能演算到 {max_allowed}（最新抽签 {max_record_date}+1天），无法生成 {end_date} 的数据")
     elif existing:
         # 完全没有新记录→已有范围≥请求起始才沿用，否则保持请求范围（允许往后一天预测）
         if existing["end_date"] >= start_date:
@@ -1256,12 +1277,15 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
                 (existing["id"], start_date, end_date, max_draw_date)
             ).fetchall()
         if not pending_days and end_date <= existing_end:
+            msg = f"已有 {existing_end} 前数据，跳过"
+            if start_was_adjusted or end_was_adjusted:
+                msg += f"（日期已自动调整：{req_start_date}~{req_end_date} → {start_date}~{end_date}）"
             return {
                 "ok": True, "run_id": existing["id"], "skipped": True,
                 "total_days": existing["total_days"], "hit_count": existing["hit_count"],
                 "start_date": existing["start_date"], "end_date": existing_end,
                 "project_id": pid, "project_name": proj_name,
-                "message": f"已有 {existing_end} 前数据，跳过"
+                "message": msg
             }
         # 有pending或需要接续 → 从接入点开始
         if pending_days:
@@ -1417,6 +1441,9 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         )
     db.commit()
 
+    msg = f"演算完成 {total_days}天 {hit_count}命中"
+    if start_was_adjusted or end_was_adjusted:
+        msg += f"（日期已自动调整：{req_start_date}~{req_end_date} → {start_date}~{process_dates[-1] if process_dates else end_date}）"
     return {
         "ok": True, "run_id": run_id, "skipped": False,
         "total_days": total_days, "hit_count": db.execute(
@@ -1426,7 +1453,8 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
         "new_days": len(process_dates),
         "pending_count": pending_count,
         "project_id": pid, "project_name": proj_name,
-        "continued": not is_new_run
+        "continued": not is_new_run,
+        "message": msg
     }
 
 
@@ -1522,19 +1550,25 @@ def run_simulation_endpoint(body: SimRunRequest):
 
     db = get_db()
     results = []
+    errors = []
     try:
         all_skipped = True
         for i, pid in enumerate(body.project_ids):
             rid = body.rule_ids[min(i, len(body.rule_ids) - 1)]
-            r = run_simulation(db, rid, body.start_date, body.end_date, pid)
-            results.append(r)
-            if not r.get("skipped"):
-                all_skipped = False
+            try:
+                r = run_simulation(db, rid, body.start_date, body.end_date, pid)
+                results.append(r)
+                if not r.get("skipped"):
+                    all_skipped = False
+            except HTTPException as e:
+                errors.append({"project_id": pid, "rule_id": rid, "error": e.detail})
+            except Exception as e:
+                errors.append({"project_id": pid, "rule_id": rid, "error": str(e)})
         if not all_skipped:
             refresh_analysis(db)
         # 返回最后一条的run_id给前端默认展示
         last = results[-1] if results else None
-        return {"ok": True, "runs": results, "last_run_id": last["run_id"] if last else None}
+        return {"ok": True, "runs": results, "errors": errors, "last_run_id": last["run_id"] if last else None}
     except HTTPException:
         raise
     except Exception as e:
@@ -2601,7 +2635,7 @@ def get_scope_daily(
         value_map = get_count_map_dict(db)
         # 查该集合下所有汇总
         summaries = db.execute("""
-            SELECT s.id, s.name
+            SELECT s.id, s.name, s.created_at
             FROM summaries s WHERE s.collection_id = ?
         """, (collection_id,)).fetchall()
         items = []
@@ -2634,6 +2668,7 @@ def get_scope_daily(
                         "total_value": dr["tv"] or 0,
                         "total_result": dr["tr"] or 0,
                         "rank": None,
+                        "created_at": srow["created_at"],
                     })
                 continue
 
@@ -2686,9 +2721,14 @@ def get_scope_daily(
                 "total_value": agg["tv"] or 0,
                 "total_result": agg["tr"] or 0,
                 "rank": rank,
+                "created_at": srow["created_at"],
             })
-        # 按联合 49 格排位排序
-        items.sort(key=lambda x: (x["rank"] or 999))
+        # 按名称排序（汇总1, 汇总2, ...）
+        import re
+        def sort_key(x):
+            m = re.search(r'(\d+)', x["name"])
+            return int(m.group(1)) if m else 999
+        items.sort(key=sort_key)
         db.close()
         return {"items": items, "total": len(items), "page": 1, "total_pages": 1, "level": level, "is_range": is_range}
 
