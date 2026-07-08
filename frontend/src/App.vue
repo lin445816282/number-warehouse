@@ -282,9 +282,28 @@
           </div>
         </div>
       </div>
+
+      <!-- 清理控制 -->
+      <div class="mapping-section" style="margin-top:12px">
+        <div class="mapping-header" @click="showClearControl=!showClearControl">
+          <span>🧹 清理控制</span>
+          <span class="mapping-arrow">{{ showClearControl ? '▼' : '▶' }}</span>
+        </div>
+        <div v-if="showClearControl" class="mapping-body">
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;flex-wrap:wrap">
+            <span style="font-size:13px;color:#8899b0">分析 / 演算 清空按钮：</span>
+            <button class="btn-add-sm"
+              :style="{background:allowClear?'#22c55e':'#ccc',color:'#fff'}"
+              @click="allowClear=!allowClear">
+              {{ allowClear ? '✅ 已开启' : '⛔ 已关闭' }}
+            </button>
+            <span style="font-size:11px;color:#8899b0">{{ allowClear ? '清空按钮可用，可操作' : '清空按钮已锁定（防误触）' }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- 规则运行视图 -->
+    <!-- 演算视图 -->
     <div v-if="view === 'sim'" class="sim-view">
       <div class="sim-header">
         <span class="sim-title">🚀 演算</span>
@@ -293,7 +312,8 @@
           <span v-if="running" class="btn-spin"></span>
           {{ running ? '演算中' : '运行' }}
         </button>
-        <button class="btn-add" style="background:#ee0a24;color:#fff;margin-left:8px" @click="clearAllSimData">
+        <button class="btn-add" @click="allowClear ? clearAllSimData() : null"
+          :style="{background:allowClear?'#ee0a24':'#ccc',color:'#fff',marginLeft:'8px',cursor:allowClear?'pointer':'not-allowed',opacity:allowClear?1:0.5}">
           🗑️ 清空
         </button>
       </div>
@@ -476,23 +496,23 @@
         <div style="font-size:12px;color:#8899b0;padding:4px 0">📁 {{ collections.find(c=>'c'+c.id===pfL3)?.name }} → 所有汇总{{ pfRange ? ' · '+pfDate+'~'+pfEnd : ' · 抽签'+pfItems[0]?.draw }}</div>
         <table class="pf-table">
           <thead><tr>
-            <th>汇总</th><th>项目</th>
-            <template v-if="pfRange"><th>日期</th><th>总结果</th></template>
+            <th>汇总</th><th>项目</th><th>时间</th>
+            <template v-if="pfRange"><th>总结果</th></template>
             <template v-else><th>联合49格值</th><th>排位</th><th>总结果</th></template>
             <th>正负</th>
           </tr></thead>
           <tbody>
-            <tr v-for="it in pfItems" :key="'s'+it.id" class="pf-clickable" @click="pfL2='s'+it.id; onPfL2Change()">
+            <tr v-for="it in sortedPfSummaries" :key="'s'+it.id" class="pf-clickable" @click="pfL2='s'+it.id; onPfL2Change()">
               <td style="font-weight:600">📊 {{ it.name }}</td>
               <td>{{ it.project_count }}</td>
+              <td style="font-size:12px;color:#8899b0">{{ it.date || pfDate }}</td>
               <template v-if="pfRange">
-                <td>{{ it.date }}</td>
-                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }} <button class="pf-copy-inline" @click.stop="copyNum(it.total_result)" title="复制" style="background:none;border:none;cursor:pointer;font-size:11px;margin-left:2px;opacity:0.5">📋</button></td>
               </template>
               <template v-else>
                 <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
                 <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
-                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }} <button class="pf-copy-inline" @click.stop="copyNum(it.total_result)" title="复制" style="background:none;border:none;cursor:pointer;font-size:11px;margin-left:2px;opacity:0.5">📋</button></td>
               </template>
               <td class="pf-result" :class="{neg:(it.total_result||0)<0,pos:(it.total_result||0)>=0}">{{ (it.total_result||0)>=0?'✅ 正':'❌ 负' }}</td>
             </tr>
@@ -515,12 +535,12 @@
               <td>{{ it.project_count }}</td>
               <template v-if="pfRange">
                 <td>{{ it.date }}</td>
-                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }} <button class="pf-copy-inline" @click.stop="copyNum(it.total_result)" title="复制" style="background:none;border:none;cursor:pointer;font-size:11px;margin-left:2px;opacity:0.5">📋</button></td>
               </template>
               <template v-else>
                 <td class="pf-num">{{ (it.draw_value||0).toLocaleString() }}</td>
                 <td>{{ it.rank ? '第'+it.rank+'位' : '-' }}</td>
-                <td class="pf-num">{{ it.total_result.toLocaleString() }}</td>
+                <td class="pf-num">{{ it.total_result.toLocaleString() }} <button class="pf-copy-inline" @click.stop="copyNum(it.total_result)" title="复制" style="background:none;border:none;cursor:pointer;font-size:11px;margin-left:2px;opacity:0.5">📋</button></td>
               </template>
               <td class="pf-result" :class="{neg:(it.total_result||0)<0,pos:(it.total_result||0)>=0}">{{ (it.total_result||0)>=0?'✅ 正':'❌ 负' }}</td>
             </tr>
@@ -539,7 +559,10 @@
               <td>-</td><td>-</td>
               <td class="pf-num" style="font-weight:700">{{ pfSummary.total_value.toLocaleString() }}</td>
               <td>-</td>
-              <td class="pf-result" :class="{neg:pfSummary.total_result<0,pos:pfSummary.total_result>=0}" style="font-weight:700">{{ pfSummary.total_result.toLocaleString() }}</td>
+              <td class="pf-result" :class="{neg:pfSummary.total_result<0,pos:pfSummary.total_result>=0}" style="font-weight:700">
+                {{ pfSummary.total_result.toLocaleString() }}
+                <button class="pf-copy-btn" @click.stop="copyTotalResult" title="复制总结果" style="background:none;border:none;cursor:pointer;font-size:14px;margin-left:4px;opacity:0.6">📋</button>
+              </td>
             </tr>
             <tr v-for="it in pfItems" :key="it.date+it.id">
               <td>{{ it.date }}</td>
@@ -569,7 +592,8 @@
       <div class="sim-header">
         <span class="sim-title">📈 分析</span>
         <div style="display:flex;gap:6px">
-          <button class="btn-add-sm" @click="clearAnalysis" style="background:#ee0a24;color:#fff">🗑 清空</button>
+          <button class="btn-add-sm" @click="allowClear ? clearAnalysis() : null"
+            :style="{background:allowClear?'#ee0a24':'#ccc',color:'#fff',cursor:allowClear?'pointer':'not-allowed',opacity:allowClear?1:0.5}">🗑 清空</button>
         </div>
       </div>
       <div class="sim-query card">
@@ -715,6 +739,8 @@
             </div>
             <button class="btn-add-sm" @click="queryGridDate">🔍</button>
             <button class="btn-add-sm" @click="copyGrid">📋</button>
+            <button class="btn-add-sm" @click="copyTop25" title="复制前25号码(值最大→小)">📋25</button>
+            <button class="btn-add-sm" @click="copyBottom24" title="复制后24号码(值最大→小后24)">📋24</button>
           </div>
         </div>
         <div class="grid49-table">
@@ -1541,6 +1567,8 @@ async function delRule(id) {
 
 // ===== 次数映射管理 =====
 const showMapping = ref(false)
+const showClearControl = ref(false)
+const allowClear = ref(false)
 const mappingList = ref([])
 const mapCountN = ref(null)
 const mapValue = ref(null)
@@ -1935,6 +1963,20 @@ function copyGrid() {
   navigator.clipboard.writeText(vals).then(() => $notify('49值已复制(可粘贴到Excel)'), () => $notify('复制失败', true))
 }
 
+function copyTop25() {
+  if (!grid49.value?.grid?.length) return
+  const sorted = [...grid49.value.grid].sort((a, b) => b.value - a.value)
+  const nums = sorted.slice(0, 25).map(g => g.n).join(',')
+  navigator.clipboard.writeText(nums).then(() => $notify('前25号码已复制'), () => $notify('复制失败', true))
+}
+
+function copyBottom24() {
+  if (!grid49.value?.grid?.length) return
+  const sorted = [...grid49.value.grid].sort((a, b) => b.value - a.value)
+  const nums = sorted.slice(25).map(g => g.n).join(',')
+  navigator.clipboard.writeText(nums).then(() => $notify('后24号码已复制'), () => $notify('复制失败', true))
+}
+
 function copyValue(val) {
   if (val === null || val === undefined) return
   navigator.clipboard.writeText(String(val)).then(() => $notify(`已复制: ¥${val.toLocaleString()}`))
@@ -2268,9 +2310,25 @@ async function execTodayRun() {
     const data = await res.json()
     if (!res.ok) throw new Error(data.detail || '运行失败')
     const runs = data.runs || []
+    const errors = data.errors || []
     const hits = runs.reduce((s, r) => s + (r.hit_count || 0), 0)
     const days = runs.reduce((s, r) => s + (r.total_days || 0), 0)
-    $notify(`✅ 演算完成 ${runs.length}项目 · 命中 ${hits}/${days}`)
+    let msg = `✅ 演算完成 ${runs.length}项目 · 命中 ${hits}/${days}`
+    if (errors.length) {
+      if (runs.length === 0) {
+        // 全部失败 → 显示红色错误
+        $notify(errors[0].error, true)
+        showTodayRun.value = false
+        todayRunRunning.value = false
+        return
+      }
+      msg += ` · ⚠️ ${errors.length}项失败`
+    }
+    const adjusted = runs.filter(r => r.message && r.message.includes('调整'))
+    if (adjusted.length) msg += ` · ⚠️ ${adjusted.length}项日期被自动调整`
+    $notify(msg)
+    if (errors.length) console.warn('演算失败项:', errors)
+    if (adjusted.length) console.warn('日期调整项:', adjusted.map(r => r.message))
     showTodayRun.value = false
   } catch (e) { $notify(e.message, true) }
   todayRunRunning.value = false
@@ -2394,6 +2452,27 @@ const pfItems = ref([])
 const pfSummary = ref(null)
 const pfLevel = ref('projects')
 const pfSearched = ref(false)
+
+const sortedPfSummaries = computed(() => {
+  if (pfLevel.value !== 'summaries') return pfItems.value
+  return [...pfItems.value].sort((a, b) => {
+    const na = parseInt((a.name||'').match(/\d+/)?.[0] || '999')
+    const nb = parseInt((b.name||'').match(/\d+/)?.[0] || '999')
+    return na - nb
+  })
+})
+
+function copyTotalResult() {
+  if (pfSummary.value) {
+    navigator.clipboard.writeText(String(pfSummary.value.total_result))
+    $notify('✅ 已复制总结果')
+  }
+}
+
+function copyNum(val) {
+  navigator.clipboard.writeText(String(val))
+  $notify('✅ 已复制 ' + val.toLocaleString())
+}
 
 async function loadProfit() {
   pfSearched.value = true
