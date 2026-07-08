@@ -749,6 +749,11 @@
             <button class="btn-add-sm" @click="copyBottom24" title="复制后24号码(值最大→小后24)">📋24</button>
           </div>
         </div>
+        <div v-if="summaries.length" class="sum-chips">
+          <span v-for="s in summaries" :key="s.id" class="sum-chip"
+                :class="{active: allSelected || selectedSummaryIds.includes(s.id)}"
+                @click="toggleSummary(s.id)">{{ stripGrade(s.name) }}</span>
+        </div>
         <div class="grid49-table">
           <div v-for="g in grid49.grid" :key="g.n" class="grid49-cell" :class="{zero:g.value===0}">
             <span class="g49-n">{{ g.n }}</span>
@@ -779,13 +784,7 @@
         </div>
       </div>
       <div v-if="colSel && !sumSel">
-        <!-- 子标签：汇总/项目 -->
-        <div class="col-subtabs">
-          <span :class="{active:colSubTab==='summary'}" @click="colSubTab='summary'">📊 汇总</span>
-          <span :class="{active:colSubTab==='project'}" @click="colSubTab='project'">📁 项目</span>
-        </div>
         <!-- 汇总列表 -->
-        <template v-if="colSubTab==='summary'">
         <div class="col-section-hd">
           <span class="col-section-tl">{{ colSel?.name }} · 汇总列表</span>
           <button class="btn-add-sm" @click="openAddSummary">+ 汇总</button>
@@ -804,21 +803,6 @@
           <button class="col-copy-btn" @click.stop="copyValue(s.total_value)" title="复制累计值">📋</button>
           <span class="col-card-arrow">›</span>
         </div>
-        </template>
-        <!-- 项目列表 -->
-        <template v-if="colSubTab==='project'">
-        <div class="col-section-hd">
-          <span class="col-section-tl">{{ colSel?.name }} · 项目列表</span>
-          <button class="btn-add-sm" @click="openAddColProject">+ 项目</button>
-        </div>
-        <div v-if="!colProjects.length" class="gs-empty">暂无项目，点击 + 创建</div>
-        <div v-for="p in colProjects" :key="'cp'+p.id" class="col-card" @click="selectProject(p.id); view='groupset'">
-          <div class="col-card-left">
-            <span class="col-card-name">📁 {{ p.name }}</span>
-          </div>
-          <span class="col-card-arrow">›</span>
-        </div>
-        </template>
       </div>
       <div v-if="sumSel && !rgSel">
         <div class="col-section-hd">
@@ -1900,6 +1884,12 @@ const gridDate = ref('')
 const showGridProj = ref(false)
 const gridLevel = ref('')
 const gridId = ref(null)
+const selectedSummaryIds = ref([])  // 空=全选，有值=指定汇总ID
+const allSelected = computed(() => selectedSummaryIds.value.length === 0)
+
+function stripGrade(name) {
+  return name.replace(/^[A-Z]级\s*/, '')
+}
 const gridTotalSum = computed(() => {
   if (!grid49.value?.grid) return 0
   return grid49.value.grid.reduce((s, g) => s + (g.value || 0), 0)
@@ -1914,6 +1904,35 @@ const gridResult = computed(() => {
   if (gridDrawVal.value == null) return null
   return gridDrawVal.value * 47 - gridTotalSum.value
 })
+
+// 数字归属：1-49 → 汇总名
+const numSummaryMap = ref(null)
+const showNumSum = ref(false)
+const summaryColorList = ref([])  // [{name, color}]
+const SUM_COLORS = [
+  '#4da6ff', '#22c55e', '#f59e0b', '#ee0a24', '#8b5cf6', '#06b6d4',
+  '#f97316', '#ec4899', '#14b8a6', '#6366f1'
+]
+function getSumColor(sname) {
+  if (!sname) return '#888'
+  const idx = summaryColorList.value.findIndex(s => s.name === sname)
+  return idx >= 0 ? summaryColorList.value[idx].color : '#888'
+}
+async function loadNumSummaryMap(cid) {
+  try {
+    const res = await fetch(API + '/collections/' + cid + '/num-summary-map')
+    const data = await res.json()
+    numSummaryMap.value = data.map
+    if (data.summaries?.length) {
+      summaryColorList.value = data.summaries.map((s, i) => ({
+        name: s, color: SUM_COLORS[i % SUM_COLORS.length]
+      }))
+    }
+    showNumSum.value = true
+  } catch (e) {
+    numSummaryMap.value = null
+  }
+}
 
 const showEditItems = ref(false)
 const editItemsForm = ref({ project_ids: [] })
@@ -1951,12 +1970,15 @@ async function loadAllSimRules() {
   } catch (e) { console.error(e) }
 }
 
-async function loadGrid(level, id, date = '') {
+async function loadGrid(level, id, date = '', extraParams = '') {
   try {
     let url = level === 'collection' ? `${API}/collections/${id}/grid`
             : level === 'summary' ? `${API}/summaries/${id}/grid`
             : `${API}/run-groups/${id}/grid`
-    if (date) url += `?date=${encodeURIComponent(date)}`
+    const params = []
+    if (date) params.push(`date=${encodeURIComponent(date)}`)
+    if (extraParams) params.push(extraParams)
+    if (params.length) url += '?' + params.join('&')
     const res = await fetch(url)
     const data = await res.json()
     console.log('loadGrid', level, id, 'cells:', data.grid?.length, 'proj:', data.projects?.length)
@@ -1981,14 +2003,14 @@ function copyGrid() {
 function copyTop25() {
   if (!grid49.value?.grid?.length) return
   const sorted = [...grid49.value.grid].sort((a, b) => b.value - a.value)
-  const nums = sorted.slice(0, 25).map(g => g.n).join(',')
+  const nums = sorted.slice(0, 25).map(g => g.n).join('.')
   navigator.clipboard.writeText(nums).then(() => $notify('前25号码已复制'), () => $notify('复制失败', true))
 }
 
 function copyBottom24() {
   if (!grid49.value?.grid?.length) return
   const sorted = [...grid49.value.grid].sort((a, b) => b.value - a.value)
-  const nums = sorted.slice(25).map(g => g.n).join(',')
+  const nums = sorted.slice(25).map(g => g.n).join('.')
   navigator.clipboard.writeText(nums).then(() => $notify('后24号码已复制'), () => $notify('复制失败', true))
 }
 
@@ -2019,7 +2041,26 @@ function backTo(level) {
 
 function selectCollection(c) {
   colSel.value = c; sumSel.value = null; rgSel.value = null; colSubTab.value = 'summary'
-  loadSummaries(c.id); loadColProjects(c.id); loadGrid('collection', c.id)
+  loadSummaries(c.id); loadColProjects(c.id)
+  selectedSummaryIds.value = []  // 默认全选
+  loadGrid('collection', c.id)
+  loadNumSummaryMap(c.id)
+}
+
+function toggleSummary(sid) {
+  if (allSelected.value) {
+    selectedSummaryIds.value = [sid]
+  } else {
+    const found = selectedSummaryIds.value.includes(sid)
+    if (found) {
+      selectedSummaryIds.value = selectedSummaryIds.value.filter(id => id !== sid)
+    } else {
+      selectedSummaryIds.value = [...selectedSummaryIds.value, sid]
+    }
+  }
+  const ids = selectedSummaryIds.value
+  const params = ids.length === 0 ? '' : 'summary_ids=' + ids.join(',')
+  loadGrid('collection', colSel.value.id, gridDate.value, params)
 }
 
 function selectSummary(s) {
@@ -2903,6 +2944,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .rg-proj-pill { padding: 5px 14px; border-radius: 14px; font-size: 13px; background: #f0f4f8; color: #8899b0; cursor: pointer; font-weight: 600; transition: all .15s; }
 .rg-proj-pill.active { background: linear-gradient(135deg, #4da6ff, #1a2a4a); color: #fff; }
 
+/* 数字归属 */
+.numsum-section { padding: 10px 12px; margin: 8px 0; }
+.numsum-hd { font-size: 13px; font-weight: 600; color: #1a2a4a; cursor: pointer; user-select: none; }
+.numsum-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-top: 8px; }
+.numsum-cell { padding: 6px 0; border-radius: 6px; font-size: 12px; text-align: center; }
+.numsum-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.numsum-tag { padding: 2px 10px; border-radius: 10px; font-size: 11px; color: #fff; font-weight: 600; }
 /* ===== 49值网格 ===== */
 .grid49-section { padding: 12px; margin: 8px 0; }
 .grid49-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; flex-wrap: wrap; gap: 4px; }
@@ -2939,9 +2987,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .pf-result.pos { color: #22c55e; }
 .pf-result.neg { color: #ee0a24; }
 .pf-table tbody tr:hover { background: #f8fafc; }
-.col-subtabs { display: flex; gap: 0; background: #f0f4f8; border-radius: 10px; padding: 3px; margin: 0 0 12px; }
-.col-subtabs span { flex: 1; text-align: center; padding: 8px 0; border-radius: 8px; font-size: 13px; font-weight: 600; color: #8899b0; cursor: pointer; transition: all .2s; }
-.col-subtabs span.active { background: #fff; color: #1a2a4a; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .export-view { position:fixed; top:100px; left:0; right:0; bottom:0; z-index:10; }
 .export-iframe { width:100%; height:100%; border:none; }
+
+/* 汇总选择芯片 */
+.sum-chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
+.sum-chip { padding: 8px 18px; border-radius: 10px; font-size: 13px; font-weight: 600;
+  background: linear-gradient(135deg, #4da6ff, #1a2a4a); color: #fff; cursor: pointer;
+  transition: all .2s; border: none; user-select: none; opacity: 0.45; }
+.sum-chip.active {
+  opacity: 1;
+  box-shadow: 0 0 0 2px rgba(238,10,36,.35), 0 4px 16px rgba(77,166,255,.25);
+  transform: translateY(-1px);
+}
 </style>

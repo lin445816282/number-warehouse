@@ -200,6 +200,11 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (run_group_id) REFERENCES run_groups(id)
         );
+        CREATE TABLE IF NOT EXISTS direct_mapping (
+            num INTEGER PRIMARY KEY,
+            group_name TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        );
     """)
     # 初始化配置
     for k, v in [("mapping", json.dumps(DEFAULT_MAPPING, ensure_ascii=False)),
@@ -2140,23 +2145,29 @@ def _refresh_run_group_stats(db, rg_id: int):
     )
 
 
-def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
-    """给定项目ID列表，聚合 49 格。target_date 指定日期，不传则取最新日。批量查询优化版"""
+def _build_49_grid(db, project_ids: list, target_date: str = None, run_ids: list = None) -> dict:
+    """给定项目ID列表，聚合 49 格。target_date 指定日期，不传则取最新日。run_ids 可选指定具体 sim_run"""
     value_map = get_count_map_dict(db)
     if not project_ids:
         return {"last_date": "", "grid": [], "projects": []}
 
+    # 1) 取 sim_runs：优先用 run_ids，否则每个项目取最新
     p = ",".join("?" * len(project_ids))
-
-    # 1) 批量取每个项目最新 sim_run（用子查询找最大id）
-    run_rows = db.execute(
-        f"SELECT srn.id, srn.project_id, srn.project_name, srn.hit_count, srn.total_days "
-        f"FROM sim_runs srn "
-        f"JOIN (SELECT project_id, MAX(id) as max_id FROM sim_runs WHERE project_id IN ({p}) GROUP BY project_id) mx "
-        f"ON srn.project_id=mx.project_id AND srn.id=mx.max_id "
-        f"ORDER BY srn.project_id",
-        project_ids
-    ).fetchall()
+    if run_ids:
+        rp = ",".join("?" * len(run_ids))
+        run_rows = db.execute(
+            f"SELECT srn.id, srn.project_id, srn.project_name, srn.hit_count, srn.total_days "
+            f"FROM sim_runs srn WHERE srn.id IN ({rp})", run_ids
+        ).fetchall()
+    else:
+        run_rows = db.execute(
+            f"SELECT srn.id, srn.project_id, srn.project_name, srn.hit_count, srn.total_days "
+            f"FROM sim_runs srn "
+            f"JOIN (SELECT project_id, MAX(id) as max_id FROM sim_runs WHERE project_id IN ({p}) GROUP BY project_id) mx "
+            f"ON srn.project_id=mx.project_id AND srn.id=mx.max_id "
+            f"ORDER BY srn.project_id",
+            project_ids
+        ).fetchall()
 
     if not run_rows:
         return {"last_date": "", "grid": [], "projects": []}
@@ -2174,7 +2185,7 @@ def _build_49_grid(db, project_ids: list, target_date: str = None) -> dict:
         ).fetchone()
         use_date = last["dt"] or ""
 
-    # 3) 批量查所有 sim_results（一次查询替代逐条查询）
+    # 3) 批量查所有 sim_results
     sim_rows = []
     if use_date:
         sim_rows = db.execute(
@@ -2279,14 +2290,95 @@ def get_summary_grid(sid: int, date: str = None):
 
 
 @app.get("/api/collections/{cid}/grid")
-def get_collection_grid(cid: int, date: str = None):
-    """集合: 49值聚合(所有项目)"""
+def get_collection_grid(cid: int, date: str = None, summary_ids: str = None):
+    """集合: 49值聚合。summary_ids=1,2,3 可选过滤指定汇总。多汇总时分别取各自日期再合并"""
     db = get_db()
-    items = db.execute("SELECT id FROM projects WHERE deleted_at IS NULL").fetchall()
-    ids = [i["id"] for i in items]
-    result = _build_49_grid(db, ids, date)
+    if summary_ids:
+        sids = [int(x.strip()) for x in summary_ids.split(",") if x.strip()]
+        if len(sids) == 1:
+            # 单汇总：直接走原逻辑（快速路径）
+            p = ",".join("?" * len(sids))
+            rows = db.execute(
+                f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+                f"JOIN run_groups rg ON rgi.run_group_id=rg.id "
+                f"WHERE rg.summary_id IN ({p})", sids
+            ).fetchall()
+            ids = [r["project_id"] for r in rows]
+            result = _build_49_grid(db, ids, date)
+        else:
+            # 多汇总：分别计算每个汇总的 grid，再合并（各自用各自的日期）
+            grid = {n: 0 for n in range(1, 50)}
+            projects = []
+            last_date = ""
+            for sid in sids:
+                rows = db.execute(
+                    "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+                    "JOIN run_groups rg ON rgi.run_group_id=rg.id "
+                    "WHERE rg.summary_id=?", (sid,)
+                ).fetchall()
+                ids = [r["project_id"] for r in rows]
+                sub = _build_49_grid(db, ids, date)
+                if sub["last_date"] and (not last_date or sub["last_date"] > last_date):
+                    last_date = sub["last_date"]
+                for g in sub["grid"]:
+                    grid[g["n"]] += g["value"]
+                projects.extend(sub.get("projects", []))
+            result = {
+                "last_date": last_date,
+                "grid": [{"n": n, "value": grid[n]} for n in range(1, 50)],
+                "projects": projects
+            }
+    else:
+        items = db.execute("SELECT id FROM projects WHERE deleted_at IS NULL").fetchall()
+        ids = [i["id"] for i in items]
+        result = _build_49_grid(db, ids, date)
     db.close()
     return result
+
+
+@app.get("/api/collections/{cid}/num-summary-map")
+def get_num_summary_map(cid: int):
+    """返回 1-49 每个数字归属的汇总名称。走 project_groups → project → run_group → summary 链路。"""
+    db = get_db()
+    summaries = db.execute("SELECT id, name FROM summaries WHERE collection_id=? ORDER BY name", (cid,)).fetchall()
+    sid_names = {s["id"]: s["name"] for s in summaries}
+    if not sid_names:
+        db.close()
+        return {"map": {}, "summaries": []}
+
+    rows = db.execute("""
+        SELECT pg.numbers, s.id as sid, s.name as sname
+        FROM project_groups pg
+        JOIN projects p ON p.id = pg.project_id AND p.deleted_at IS NULL
+        JOIN run_group_items rgi ON rgi.project_id = p.id
+        JOIN run_groups rg ON rg.id = rgi.run_group_id
+        JOIN summaries s ON s.id = rg.summary_id AND s.collection_id = ?
+        WHERE pg.deleted_at IS NULL
+    """, (cid,)).fetchall()
+
+    db.close()
+    # 数→汇总计数
+    num_counter = {}
+    for r in rows:
+        nums = json.loads(r["numbers"]) if r["numbers"] else []
+        for n in nums:
+            n = int(n)
+            if 1 <= n <= 49:
+                if n not in num_counter:
+                    num_counter[n] = {}
+                sname = r["sname"]
+                num_counter[n][sname] = num_counter[n].get(sname, 0) + 1
+
+    # 选归属最多的汇总
+    result = {}
+    for n in range(1, 50):
+        if n in num_counter:
+            best = max(num_counter[n], key=num_counter[n].get)
+            result[n] = best
+        else:
+            result[n] = None
+
+    return {"map": result, "summaries": list(sid_names.values())}
 
 
 class RunGroupExec(BaseModel):
@@ -3140,7 +3232,10 @@ def _compute_snapshot(db, collection_id: int, use_date: str):
 
 @app.post("/api/export/save-daily")
 def save_daily_snapshot(collection_id: int, date: str = None):
-    """手动触发：计算当日49格数据并存入 daily_snapshots + daily_project_snapshots"""
+    """手动触发：计算当日49格数据并存入 daily_snapshots + daily_project_snapshots
+    
+    特殊集合 14/16：从 A级集合(19) 拉快照聚合，不需自己算项目
+    """
     db = get_db()
     from datetime import date as dt
 
@@ -3150,6 +3245,129 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
         use_date = rec["dt"] or dt.today().isoformat()
 
+    # ── 集合14/16：从集合19的 daily_snapshots 拉取当日值 ──
+    if collection_id in (14, 16):
+        max_n = 4 if collection_id == 14 else 6
+
+        src_rows = db.execute(
+            "SELECT summary_name, total_value "
+            "FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id",
+            (use_date,)
+        ).fetchall()
+
+        if not src_rows:
+            db.close()
+            return {"ok": True, "date": use_date, "draw_number": None, "saved": 0,
+                    "proj_saved": 0, "grid_saved": 0, "daily_amount": 0,
+                    "message": "集合19当日无快照，请先采集"}
+
+        draw_rec = db.execute(
+            "SELECT draw_number FROM daily_snapshots WHERE date=? AND collection_id=19 LIMIT 1",
+            (use_date,)
+        ).fetchone()
+        dn = draw_rec["draw_number"] if draw_rec else None
+
+        # ── 先存grid ──
+        src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
+        if src_names:
+            db.execute(
+                "DELETE FROM daily_grid_snapshots WHERE date=? AND collection_id=?",
+                (use_date, collection_id)
+            )
+            placeholders = ",".join("?" * len(src_names))
+            grid_rows = db.execute(f"""
+                SELECT summary_name, count_n, value, value_x_47, cumulative_sum
+                FROM daily_grid_snapshots
+                WHERE collection_id=19 AND date=?
+                AND summary_name IN ({placeholders})
+                ORDER BY summary_name, count_n
+            """, [use_date] + src_names).fetchall()
+
+            grid_saved = 0
+            for gr in grid_rows:
+                db.execute(
+                    "INSERT INTO daily_grid_snapshots (date, collection_id, summary_name, project_id, project_name, count_n, value, value_x_47, cumulative_sum) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (use_date, collection_id, gr["summary_name"], 0, "累计",
+                     gr["count_n"], gr["value"], gr["value_x_47"], gr["cumulative_sum"])
+                )
+                grid_saved += 1
+        else:
+            grid_saved = 0
+
+        # ── 排位：从集合19的对应汇总合并sim_results算 ──
+        rank = None
+        if dn:
+            # 取集合19前max_n个汇总的项目ID
+            src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
+            if src_names:
+                ph = ",".join("?" * len(src_names))
+                # 获取这些汇总下所有项目的ID（通过run_groups→run_group_items）
+                proj_rows = db.execute(f"""
+                    SELECT DISTINCT rgi.project_id
+                    FROM run_group_items rgi
+                    JOIN run_groups rg ON rg.id = rgi.run_group_id
+                    JOIN summaries s ON s.id = rg.summary_id
+                    WHERE s.collection_id=19 AND s.name IN ({ph})
+                """, src_names).fetchall()
+                pids = [r["project_id"] for r in proj_rows]
+                if pids:
+                    # count_value_map
+                    cv_rows = db.execute("SELECT count_n, value FROM count_value_map").fetchall()
+                    cv_map = {r["count_n"]: r["value"] for r in cv_rows}
+                    # 取最新sim_runs对应的sim_results
+                    pid_ph = ",".join("?" * len(pids))
+                    sr_rows = db.execute(f"""
+                        SELECT sr.count_n, sr.numbers_json
+                        FROM sim_results sr
+                        JOIN sim_runs srn ON sr.run_id = srn.id
+                        WHERE srn.project_id IN ({pid_ph}) AND sr.date=?
+                        AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)
+                    """, pids + [use_date]).fetchall()
+                    if sr_rows:
+                        import json
+                        pos_values = {n: 0 for n in range(1, 50)}
+                        for r in sr_rows:
+                            nums = json.loads(r["numbers_json"])
+                            val = cv_map.get(r["count_n"], 0)
+                            for num in nums:
+                                if 1 <= num <= 49:
+                                    pos_values[num] += val
+                        sorted_pos = sorted(pos_values.items(), key=lambda x: x[1], reverse=True)
+                        for i, (num, _) in enumerate(sorted_pos, 1):
+                            if num == dn:
+                                rank = i
+                                break
+
+        # ── 存汇总 ──
+        saved = 0
+        daily_amount = 0
+        for i, r in enumerate(src_rows):
+            if i >= max_n:
+                break
+            tgt_name = f"当日汇总{i+1}"
+            sid = db.execute(
+                "SELECT id FROM summaries WHERE name=? AND collection_id=?",
+                (tgt_name, collection_id)
+            ).fetchone()
+            if not sid:
+                continue
+            val = r["total_value"]
+            db.execute(
+                "INSERT OR REPLACE INTO daily_snapshots (date, collection_id, draw_number, summary_id, summary_name, projects, hit_rate, total_value, draw_value_rank) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (use_date, collection_id, dn, sid[0], tgt_name, 0, 0, val, rank)
+            )
+            daily_amount += (val or 0)
+            saved += 1
+
+        db.commit()
+        db.close()
+        return {"ok": True, "date": use_date, "draw_number": dn, "saved": saved,
+                "proj_saved": 0, "grid_saved": grid_saved, "daily_amount": round(daily_amount, 2),
+                "message": f"从A级集合累计 {max_n} 个汇总 + {grid_saved} 格"}
+
+    # ── 正常集合：从项目计算 ──
     summaries_data, daily_amount, draw_number, project_details, grid_details = _compute_snapshot(db, collection_id, use_date)
 
     saved = 0
@@ -3339,6 +3557,26 @@ def export_grid_detail(collection_id: int, date: str = None):
     return {"date": use_date, "grids": dict(result), "source": "computed"}
 
 
+@app.get("/api/export/collection-info")
+def export_collection_info(collection_id: int):
+    """返回集合信息和汇总列表"""
+    db = get_db()
+    coll = db.execute("SELECT id, name FROM collections WHERE id=?", (collection_id,)).fetchone()
+    if not coll:
+        db.close()
+        raise HTTPException(status_code=404, detail="集合不存在")
+    sums = db.execute(
+        "SELECT id, name FROM summaries WHERE collection_id=? ORDER BY id",
+        (collection_id,)
+    ).fetchall()
+    db.close()
+    return {
+        "collection_id": coll["id"],
+        "collection_name": coll["name"],
+        "summaries": [{"id": s["id"], "name": s["name"]} for s in sums]
+    }
+
+
 @app.get("/api/export/latest-snapshot-date")
 def latest_snapshot_date(collection_id: int):
     """返回最新快照日期"""
@@ -3400,32 +3638,137 @@ def sync_to_store(collection_id: int, date: str = None):
         use_date = rec["dt"] or dt.today().isoformat()
         db_tmp.close()
 
-    # 采集数据
-    db = get_db()
-    summaries_data, daily_amount, draw_number, _, _ = _compute_snapshot(db, collection_id, use_date)
-    db.close()
+    # ── 集合14/16：从集合19拉当日快照，排位从grid算 ──
+    if collection_id in (14, 16):
+        db = get_db()
+        max_n = 4 if collection_id == 14 else 6
+        src_rows = db.execute(
+            "SELECT summary_name, total_value "
+            "FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id",
+            (use_date,)
+        ).fetchall()
+
+        # ── 排位：从集合19对应汇总的sim_results合并算 ──
+        rank = None
+        src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
+        dn_rec = db.execute(
+            "SELECT draw_number FROM daily_snapshots WHERE date=? AND collection_id=19 LIMIT 1",
+            (use_date,)
+        ).fetchone()
+        dn = dn_rec["draw_number"] if dn_rec else None
+        if dn and src_names:
+            ph = ",".join("?" * len(src_names))
+            proj_rows = db.execute(f"""
+                SELECT DISTINCT rgi.project_id
+                FROM run_group_items rgi
+                JOIN run_groups rg ON rg.id = rgi.run_group_id
+                JOIN summaries s ON s.id = rg.summary_id
+                WHERE s.collection_id=19 AND s.name IN ({ph})
+            """, src_names).fetchall()
+            pids = [r["project_id"] for r in proj_rows]
+            if pids:
+                cv_rows = db.execute("SELECT count_n, value FROM count_value_map").fetchall()
+                cv_map = {r["count_n"]: r["value"] for r in cv_rows}
+                pid_ph = ",".join("?" * len(pids))
+                sr_rows = db.execute(f"""
+                    SELECT sr.count_n, sr.numbers_json
+                    FROM sim_results sr
+                    JOIN sim_runs srn ON sr.run_id = srn.id
+                    WHERE srn.project_id IN ({pid_ph}) AND sr.date=?
+                    AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)
+                """, pids + [use_date]).fetchall()
+                if sr_rows:
+                    import json
+                    pos_values = {n: 0 for n in range(1, 50)}
+                    for r in sr_rows:
+                        nums = json.loads(r["numbers_json"])
+                        val = cv_map.get(r["count_n"], 0)
+                        for num in nums:
+                            if 1 <= num <= 49:
+                                pos_values[num] += val
+                    sorted_pos = sorted(pos_values.items(), key=lambda x: x[1], reverse=True)
+                    for i, (num, _) in enumerate(sorted_pos, 1):
+                        if num == dn:
+                            rank = i
+                            break
+        db.close()
+
+        if not src_rows:
+            return {"ok": True, "records": 0, "message": "集合19当日无快照，请先采集"}
+
+        summaries_data = []
+        for i, r in enumerate(src_rows):
+            if i >= max_n:
+                break
+            summaries_data.append({
+                "name": f"当日汇总{i+1}",
+                "projects": 0,
+                "hit_rate": 0,
+                "total_value": r["total_value"],
+                "draw_value_rank": rank,
+            })
+    else:
+        # 正常集合：从项目计算
+        db = get_db()
+        summaries_data, _, draw_number, _, _ = _compute_snapshot(db, collection_id, use_date)
+        db.close()
 
     # 汇总名 → 门店
     STORE_MAP = {
         "B级汇总1": "一店", "B级汇总2": "二店", "B级汇总3": "三店",
         "B级汇总4": "四店", "B级汇总5": "五店", "B级汇总6": "六店",
+        "当日汇总1": "一店", "当日汇总2": "二店", "当日汇总3": "三店",
+        "当日汇总4": "四店", "当日汇总5": "五店", "当日汇总6": "六店",
     }
 
+    # 集合14/16 → 各自独立门店
+    DIR_STORE = {14: "集合14", 16: "集合16"}
+
     records = []
-    for s in (summaries_data or []):
-        store = STORE_MAP.get(s.get("name", ""))
-        if not store:
-            continue
-        amount = s.get("total_value") or 0
-        rank = s.get("draw_value_rank") or 0
+    if collection_id in DIR_STORE:
+        # 直接推集合级总计到独立门店
+        store = DIR_STORE[collection_id]
+        total = sum(s["total_value"] for s in (summaries_data or []))
+        rank = summaries_data[0]["draw_value_rank"] if summaries_data else None
         records.append({
-            "id": f"{use_date}-{s['name']}",
+            "id": f"{use_date}-col{collection_id}-income",
             "store": store,
             "date": use_date,
             "category": "income",
-            "amount": amount,
-            "note": f"排位 {rank}"
+            "amount": total,
+            "note": f"集合{collection_id} 排位{rank}"
         })
+        records.append({
+            "id": f"{use_date}-col{collection_id}-cat",
+            "store": store,
+            "date": use_date,
+            "category": "cat_1783487972049",
+            "amount": rank or 0,
+            "note": f"集合{collection_id} 排位{rank} ¥{total:,.0f}"
+        })
+    else:
+        for s in (summaries_data or []):
+            store = STORE_MAP.get(s.get("name", ""))
+            if not store:
+                continue
+            amount = s.get("total_value") or 0
+            rank = s.get("draw_value_rank") or 0
+            records.append({
+                "id": f"{use_date}-{s['name']}-income",
+                "store": store,
+                "date": use_date,
+                "category": "income",
+                "amount": amount,
+                "note": f"排位 {rank}"
+            })
+            records.append({
+                "id": f"{use_date}-{s['name']}-cat",
+                "store": store,
+                "date": use_date,
+                "category": "cat_1783487972049",
+                "amount": rank,
+                "note": f"排位 {rank}  ·  ¥{amount:,.0f}"
+            })
 
     if not records:
         return {"ok": True, "records": 0, "message": "无数据可推"}
@@ -3444,6 +3787,52 @@ def sync_to_store(collection_id: int, date: str = None):
         return {"ok": False, "error": f"推送失败 HTTP {resp.status_code}: {resp.text[:200]}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── 归位：1-49 → A-L 组映射 ──────────────────
+@app.get("/api/direct-mapping")
+def get_direct_mapping():
+    """返回 1-49 → 组(A-L) 映射，优先读 direct_mapping 表，否则用 BASE_GROUPS"""
+    db = get_db()
+    rows = db.execute("SELECT num, group_name FROM direct_mapping ORDER BY num").fetchall()
+    db.close()
+    if rows:
+        return {"mapping": [{"num": r["num"], "group": r["group_name"]} for r in rows],
+                "source": "direct"}
+    # fallback to BASE_GROUPS
+    result = []
+    for g, nums in BASE_GROUPS.items():
+        for n in nums:
+            result.append({"num": n, "group": g})
+    result.sort(key=lambda x: x["num"])
+    return {"mapping": result, "source": "base"}
+
+
+@app.put("/api/direct-mapping/{num}")
+def update_direct_mapping(num: int, group_name: str = Query(...)):
+    """更新某数字的归属组。同时重置该数字为默认值用 DELETE"""
+    if num < 1 or num > 49:
+        raise HTTPException(400, "num 需在 1-49 之间")
+    if group_name not in GROUPS:
+        raise HTTPException(400, f"组名需为 {'/'.join(GROUPS)} 之一")
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO direct_mapping (num, group_name, updated_at) VALUES (?,?,datetime('now','localtime'))",
+        (num, group_name)
+    )
+    db.commit()
+    db.close()
+    return {"ok": True, "num": num, "group": group_name}
+
+
+@app.delete("/api/direct-mapping/{num}")
+def reset_direct_mapping(num: int):
+    """重置某数字到默认底板归属"""
+    db = get_db()
+    db.execute("DELETE FROM direct_mapping WHERE num=?", (num,))
+    db.commit()
+    db.close()
+    return {"ok": True, "num": num, "reset": True}
 
 
 # ==================== 启动 ====================
