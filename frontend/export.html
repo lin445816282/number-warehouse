@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>每日汇总</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#f0f2f5; color:#333; padding:12px 12px 40px; font-size:14px; }
+.header { text-align:center; margin:8px 0 16px; }
+.header .title { font-size:20px; font-weight:700; }
+.date-bar { display:flex; gap:8px; margin:12px 0; align-items:center; }
+.date-bar input { flex:1; padding:8px 12px; border:1px solid #d0d5dd; border-radius:8px; font-size:15px; background:#fff; }
+.date-bar button { padding:8px 18px; background:#1a73e8; color:#fff; border:none; border-radius:8px; font-size:14px; cursor:pointer; font-weight:600; }
+.date-info { font-size:17px; font-weight:700; text-align:center; padding:4px 0 8px; }
+.day-seq { font-size:13px; color:#888; text-align:center; padding:0 0 8px; }
+.amount-box { background:linear-gradient(135deg,#1a73e8,#0d47a1); color:#fff; border-radius:12px; padding:18px; text-align:center; margin:8px 0 12px; }
+.amount-box .label { font-size:12px; opacity:.8; }
+.amount-box .value { font-size:30px; font-weight:700; margin-top:2px; }
+.btn-collect { width:100%; padding:12px; background:#4caf50; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; margin:8px 0; cursor:pointer; }
+.btn-collect:active { opacity:.8; }
+.btn-collect:disabled { background:#aaa; }
+.btn-sync { width:100%; padding:12px; background:#ff9800; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; margin:0 0 8px; cursor:pointer; }
+.btn-sync:active { opacity:.8; }
+.btn-sync:disabled { background:#aaa; }
+.cron-row { display:flex; align-items:center; gap:8px; padding:10px 0; font-size:14px; flex-wrap:wrap; }
+.cron-label { color:#888; }
+.cron-time { font-weight:700; color:#ff9800; font-size:16px; }
+.cron-edit { padding:4px 12px; background:none; border:1px solid #ff9800; color:#ff9800; border-radius:6px; font-size:12px; cursor:pointer; }
+.cron-edit-panel { display:flex; align-items:center; gap:6px; width:100%; margin-top:6px; }
+.cron-edit-panel input { padding:6px; border:1px solid #d0d5dd; border-radius:6px; font-size:14px; }
+.cron-save { padding:6px 14px; background:#ff9800; color:#fff; border:none; border-radius:6px; font-size:13px; cursor:pointer; }
+.cron-cancel { padding:6px 14px; background:none; border:1px solid #d0d5dd; color:#888; border-radius:6px; font-size:13px; cursor:pointer; }
+.card { background:#fff; border-radius:10px; padding:14px; margin:8px 0; box-shadow:0 1px 3px rgba(0,0,0,.06); cursor:pointer; }
+.card-header { display:flex; justify-content:space-between; align-items:center; }
+.card .name { font-size:16px; font-weight:600; }
+.card .meta { font-size:11px; color:#888; margin-top:2px; }
+.card .val { font-size:20px; font-weight:700; color:#1a73e8; }
+.card .rate { font-size:11px; color:#4caf50; text-align:right; }
+.card-arrow { font-size:11px; color:#aaa; margin-left:4px; }
+.rank { display:inline-block; background:#1a73e8; color:#fff; font-size:11px; font-weight:700; padding:1px 6px; border-radius:8px; margin-right:4px; vertical-align:middle; }
+.draw-rank { display:inline-block; background:#e65100; color:#fff; font-size:10px; font-weight:700; padding:1px 6px; border-radius:8px; margin-left:6px; vertical-align:middle; }
+.proj-list { display:none; margin-top:10px; padding-top:10px; border-top:1px solid #eee; }
+.proj-list.show { display:block; }
+.proj-item { display:flex; justify-content:space-between; align-items:center; padding:8px 4px; border-bottom:1px solid #f5f5f5; cursor:pointer; flex-wrap:wrap; }
+.proj-item:last-child { border-bottom:none; }
+.proj-name { font-size:13px; color:#555; }
+.proj-val { font-size:13px; font-weight:600; color:#1565c0; }
+.proj-grids { color:#999; font-size:11px; margin-left:4px; }
+.grid-list { display:none; width:100%; margin-left:16px; padding:4px 0 4px 8px; border-left:2px solid #e3f2fd; }
+.grid-list.show { display:block; }
+.grid-item { display:flex; justify-content:space-between; padding:4px 0; font-size:12px; }
+.grid-cn { color:#e65100; font-weight:600; min-width:32px; }
+.grid-nums { color:#555; flex:1; margin:0 8px; word-break:break-all; }
+.grid-val { color:#1565c0; font-weight:600; white-space:nowrap; }
+.loading { text-align:center; padding:40px; color:#999; }
+.empty { text-align:center; padding:40px; color:#999; font-size:14px; }
+.expand-hint { font-size:11px; color:#ccc; text-align:center; margin-top:2px; }
+</style>
+</head>
+<body>
+
+<div class="header"><div class="title">📊 每日汇总</div></div>
+<div class="date-info" id="dateInfo">--</div>
+<div class="day-seq" id="daySeq"></div>
+
+<div class="date-bar">
+  <input type="date" id="dateInput">
+  <button onclick="loadData()">查询</button>
+</div>
+
+<div class="amount-box">
+  <div class="label">当日总额</div>
+  <div class="value" id="dailyAmount">--</div>
+</div>
+
+<button class="btn-collect" onclick="collectData()" id="btnCollect">📸 采集当日全量数据</button>
+<button class="btn-sync" onclick="syncToStore()" id="btnSync">🏪 同步到门店</button>
+
+<div class="cron-row">
+  <span class="cron-label">⏰ 定时同步</span>
+  <span class="cron-time" id="cronDisplay">02:00</span>
+  <button class="cron-edit" onclick="toggleCronEdit()">修改</button>
+  <div class="cron-edit-panel" id="cronEditPanel" style="display:none">
+    <input type="number" id="cronHour" min="0" max="23" value="2" style="width:50px;text-align:center"> :
+    <input type="number" id="cronMinute" min="0" max="59" value="0" style="width:50px;text-align:center">
+    <button class="cron-save" onclick="saveCron()">保存</button>
+    <button class="cron-cancel" onclick="toggleCronEdit()">取消</button>
+  </div>
+</div>
+
+<div id="cardList"></div>
+
+<script>
+const API = 'api/export';
+const CID = 19;
+
+// 默认取最新快照日期
+async function initDefaultDate() {
+  try {
+    const resp = await fetch(API + '/latest-snapshot-date?collection_id=' + CID);
+    const data = await resp.json();
+    return data.date || new Date().toISOString().split('T')[0];
+  } catch(e) {
+    return new Date().toISOString().split('T')[0];
+  }
+}
+
+async function loadData() {
+  const date = document.getElementById('dateInput').value;
+  document.getElementById('cardList').innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById('dailyAmount').textContent = '--';
+  document.getElementById('dateInfo').textContent = '加载中...';
+  
+  try {
+    const [sumResp, detailResp, gridResp] = await Promise.all([
+      fetch(API + '/daily-summary?collection_id=' + CID + '&date=' + date),
+      fetch(API + '/daily-detail?collection_id=' + CID + '&date=' + date),
+      fetch(API + '/grid-detail?collection_id=' + CID + '&date=' + date)
+    ]);
+    const sumData = await sumResp.json();
+    const detailData = await detailResp.json();
+    const gridData = await gridResp.json();
+    
+    document.getElementById('dateInfo').textContent = sumData.date + '  ·  抽签数' + (sumData.draw_number || '-');
+    document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
+    document.getElementById('dailyAmount').textContent = (sumData.daily_amount || 0).toLocaleString();
+    
+    if (!sumData.summaries || sumData.summaries.length === 0) {
+      document.getElementById('cardList').innerHTML = '<div class="empty">暂无数据，请先采集</div>';
+      return;
+    }
+    
+    const projMap = detailData.summaries || {};
+    const gridMap = gridData.grids || {};
+    let html = '';
+    sumData.summaries.forEach(s => {
+      const projects = projMap[s.name] || [];
+      const totalGrids = projects.reduce((acc,p) => acc + (p.grid_count || 0), 0);
+      const drawRank = s.draw_value_rank;
+      const drawRankHtml = drawRank ? ' <span class="draw-rank">排位 '+drawRank+'</span>' : '';
+      html += '<div class="card" onclick="toggleProj(this)"><div class="card-header"><div><div class="name">'+s.name+drawRankHtml+' <span class="card-arrow">▶</span></div><div class="meta">'+s.projects+' 项目 · 命中率 '+s.hit_rate+'%</div></div><div><div class="val">¥'+(s.total_value || 0).toLocaleString()+'</div><div class="rate">'+s.hit_rate+'%</div></div></div><div class="proj-list">'+buildProjList(s.name, projects, gridMap)+'</div></div>';
+    });
+    document.getElementById('cardList').innerHTML = html + '<div class="expand-hint">👆 点击卡片展开项目 & 排位明细</div>';
+  } catch(e) {
+    document.getElementById('cardList').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function buildProjList(sn, projects, gridMap) {
+  const snGrids = gridMap[sn] || [];
+  const gridByPid = {};
+  snGrids.forEach(g => {
+    if (!gridByPid[g.project_id]) gridByPid[g.project_id] = [];
+    gridByPid[g.project_id].push(g);
+  });
+  return projects.map(p => {
+    const grids = gridByPid[p.project_id] || [];
+    const gridHtml = grids.map(g => '<div class="grid-item"><span class="grid-cn">'+g.count_n+'中</span><span class="grid-nums">v='+g.value+'</span><span class="grid-val">×47='+(g.value_x_47||0).toLocaleString()+'</span></div>').join('');
+    return '<div class="proj-item" onclick="event.stopPropagation();toggleGrid(this)"><div><span class="proj-name">'+p.project_name+'</span><span class="proj-grids">'+grids.length+'排位</span></div><span class="proj-val">¥'+(p.value || 0).toLocaleString()+'</span><div class="grid-list">'+gridHtml+'</div></div>';
+  }).join('');
+}
+
+function toggleProj(card) {
+  const list = card.querySelector('.proj-list');
+  const arrow = card.querySelector('.card-arrow');
+  list.classList.toggle('show');
+  arrow.textContent = list.classList.contains('show') ? '▼' : '▶';
+}
+
+function toggleGrid(item) {
+  item.querySelector('.grid-list').classList.toggle('show');
+}
+
+async function collectData() {
+  const btn = document.getElementById('btnCollect');
+  btn.disabled = true;
+  btn.textContent = '⏳ 采集中...';
+  const date = document.getElementById('dateInput').value;
+  try {
+    const resp = await fetch(API + '/save-daily?collection_id=' + CID + '&date=' + date, { method: 'POST' });
+    const data = await resp.json();
+    btn.textContent = '✅ 已存: '+data.saved+'汇/'+data.proj_saved+'项/'+data.grid_saved+'排位';
+    setTimeout(function(){ btn.textContent = '📸 采集当日全量数据'; btn.disabled = false; }, 3000);
+    loadData();
+  } catch(e) {
+    btn.textContent = '❌ 失败';
+    btn.disabled = false;
+  }
+}
+
+async function syncToStore() {
+  const btn = document.getElementById('btnSync');
+  btn.disabled = true;
+  btn.textContent = '⏳ 同步中...';
+  const date = document.getElementById('dateInput').value;
+  try {
+    const resp = await fetch(API + '/sync-store?collection_id=' + CID + '&date=' + date, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = '✅ 已同步';
+    } else {
+      btn.textContent = '❌ ' + (data.error || '失败');
+    }
+    setTimeout(function(){ btn.textContent = '🏪 同步到门店'; btn.disabled = false; }, 3000);
+  } catch(e) {
+    btn.textContent = '❌ 网络错误';
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('dateInput').addEventListener('change', loadData);
+
+// ── 定时同步时间编辑 ──
+async function loadCron() {
+  try {
+    const resp = await fetch(API + '/sync-cron');
+    const data = await resp.json();
+    document.getElementById('cronDisplay').textContent = String(data.hour).padStart(2,'0') + ':' + String(data.minute).padStart(2,'0');
+    document.getElementById('cronHour').value = data.hour;
+    document.getElementById('cronMinute').value = data.minute;
+  } catch(e) {}
+}
+
+function toggleCronEdit() {
+  const panel = document.getElementById('cronEditPanel');
+  panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+}
+
+async function saveCron() {
+  const hour = parseInt(document.getElementById('cronHour').value) || 0;
+  const minute = parseInt(document.getElementById('cronMinute').value) || 0;
+  try {
+    const resp = await fetch(API + '/sync-cron', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({hour: hour, minute: minute})
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      document.getElementById('cronDisplay').textContent = String(hour).padStart(2,'0') + ':' + String(minute).padStart(2,'0');
+      toggleCronEdit();
+    }
+  } catch(e) {}
+}
+
+// 初始化
+loadCron();
+initDefaultDate().then(function(d) {
+  document.getElementById('dateInput').value = d;
+  loadData();
+});
+</script>
+</body>
+</html>

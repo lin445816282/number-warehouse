@@ -14,6 +14,7 @@
       <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 记录</span>
       <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别</span>
       <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 规则</span>
+      <span :class="{ active: view === 'export' }" @click="view = 'export'">🔄 同步</span>
     </div>
 
     <!-- 数据记录视图 -->
@@ -301,6 +302,11 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 导出视图 -->
+    <div v-if="view === 'export'" class="export-view">
+      <iframe :src="exportSrc" class="export-iframe" @load="onExportLoad"></iframe>
     </div>
 
     <!-- 演算视图 -->
@@ -1052,6 +1058,15 @@ function $notify(msg, isError = false) {
 const todayStr = new Date().toISOString().slice(0, 10)
 
 const view = ref('collection')
+
+// ===== 导出页签 =====
+const exportSrc = ref('')
+const onExportLoad = () => {}; // placeholder
+watch(view, (v) => {
+  if (v === 'export' && !exportSrc.value) {
+    exportSrc.value = 'export.html'
+  }
+})
 
 // ===== 数据记录 =====
 const records = ref([])
@@ -2927,4 +2942,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .col-subtabs { display: flex; gap: 0; background: #f0f4f8; border-radius: 10px; padding: 3px; margin: 0 0 12px; }
 .col-subtabs span { flex: 1; text-align: center; padding: 8px 0; border-radius: 8px; font-size: 13px; font-weight: 600; color: #8899b0; cursor: pointer; transition: all .2s; }
 .col-subtabs span.active { background: #fff; color: #1a2a4a; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.export-view { position:fixed; top:100px; left:0; right:0; bottom:0; z-index:10; }
+.export-iframe { width:100%; height:100%; border:none; }
 </style>
