@@ -250,6 +250,10 @@ def init_db():
     try:
         db.execute("ALTER TABLE project_period_groups ADD COLUMN end_time TEXT DEFAULT ''")
     except Exception: pass
+    # 导出快照表：抽签号 1-49 排位
+    try:
+        db.execute("ALTER TABLE daily_snapshots ADD COLUMN draw_value_rank INTEGER DEFAULT NULL")
+    except Exception: pass
     # 种子：次数映射值 1-52
     count_values = [0,0,0,25,30,35,40,45,50,55,60,64,72,81,91,102,113,126,140,156,173,191,211,233,257,283,312,343,377,415,456,501,549,603,661,725,795,871,955,1046,1145,1254,1373,1503,1645,1801,1971,2207,2473,2769,3101,3473]
     for i, v in enumerate(count_values):
@@ -2988,6 +2992,458 @@ def get_item_grid(item_id: int, date: str = None):
         "total": total,
         "draw_number": rec["draw_number"] if rec else None,
     }
+
+
+# ==================== 数据导出 API ====================
+
+def _compute_snapshot(db, collection_id: int, use_date: str):
+    """从 analysis_daily 读当日快照。返回 (summaries, daily_amount, draw_number, project_details, grid_details)。
+    project_details: [(summary_name, summary_id, project_id, project_name, result, grid_count), ...]
+    grid_details: [(summary_name, project_id, project_name, count_n, value, value_x_47, cumulative_sum), ...]"""
+    from collections import defaultdict
+
+    summaries = db.execute(
+        "SELECT id, name FROM summaries WHERE collection_id=? ORDER BY name",
+        (collection_id,)
+    ).fetchall()
+
+    # 汇总→项目映射
+    summary_projects = {}
+    all_pids = set()
+    pid_to_name = {}
+    for s in summaries:
+        rows = db.execute(
+            "SELECT DISTINCT rgi.project_id, p.name FROM run_group_items rgi "
+            "JOIN run_groups rg ON rg.id = rgi.run_group_id "
+            "JOIN projects p ON p.id = rgi.project_id "
+            "WHERE rg.summary_id=?", (s["id"],)
+        ).fetchall()
+        pids = [r[0] for r in rows]
+        summary_projects[s["id"]] = pids
+        all_pids.update(pids)
+        for r in rows:
+            pid_to_name[r[0]] = r[1]
+
+    # 查 analysis_daily
+    if not all_pids:
+        return [], 0, None, [], []
+
+    pids_str = ",".join("?" * len(all_pids))
+    ad_rows = db.execute(
+        f"SELECT project_id, project_name, count_n, value, value_x_47, cumulative_sum, result "
+        f"FROM analysis_daily WHERE date=? AND project_id IN ({pids_str})",
+        [use_date] + list(all_pids)
+    ).fetchall()
+
+    # project_id → {result, grids}
+    proj_data = {}
+    for r in ad_rows:
+        pid = r["project_id"]
+        if pid not in proj_data:
+            proj_data[pid] = {"result": 0, "grids": []}
+        proj_data[pid]["result"] = r["result"]  # 取最后一条的 result（同一项目多条时取最后）
+        proj_data[pid]["grids"].append(r)
+    
+    # 汇总项目数重新从实际 analysis_daily 有数据的项目数取
+    actual_pids = set(r["project_id"] for r in ad_rows)
+
+    result_list = []
+    daily_amount = 0
+    project_details = []
+    grid_details = []
+    total_pid_count = 0
+
+    # 次数→值映射
+    cv_rows = db.execute("SELECT count_n, value FROM count_value_map").fetchall()
+    cv_map = {r["count_n"]: r["value"] for r in cv_rows}
+
+    for s in summaries:
+        pids = summary_projects[s["id"]]
+        proj_count = 0
+        total_value = 0
+        total_grids = 0
+        
+        for pid in pids:
+            if pid not in proj_data:
+                continue
+            proj_count += 1
+            pd = proj_data[pid]
+            pname = pid_to_name.get(pid, f"项目{pid}")
+            proj_val = pd["result"]
+            total_value += proj_val
+            total_grids += len(pd["grids"])
+            
+            project_details.append((s["name"], s["id"], pid, pname, proj_val, len(pd["grids"])))
+            
+            for g in pd["grids"]:
+                grid_details.append((
+                    s["name"], pid, pname,
+                    g["count_n"], g["value"], g["value_x_47"], g["cumulative_sum"]
+                ))
+        
+        total_pid_count += proj_count
+        daily_amount += total_value
+        
+        # ── 1-49 排位：计算各位置累计值，抽签号排第几 ──
+        draw_value_rank = None
+        draw_rec_for_rank = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+        draw_num = draw_rec_for_rank["draw_number"] if draw_rec_for_rank else None
+        
+        if draw_num and pids:
+            # 获取每个项目当天的 sim_results（组→次数→数字）
+            pids_str = ",".join("?" * len(pids))
+            sr_rows = db.execute(
+                f"SELECT srn.project_id, sr.group_name, sr.count_n, sr.numbers_json "
+                f"FROM sim_results sr "
+                f"JOIN sim_runs srn ON sr.run_id = srn.id "
+                f"WHERE srn.project_id IN ({pids_str}) AND sr.date=? "
+                f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+                list(pids) + [use_date]
+            ).fetchall()
+            
+            if sr_rows:
+                # 累积 1-49 各位置的值
+                pos_values = {n: 0 for n in range(1, 50)}
+                for r in sr_rows:
+                    nums = json.loads(r["numbers_json"])
+                    val = cv_map.get(r["count_n"], 0)
+                    for num in nums:
+                        if 1 <= num <= 49:
+                            pos_values[num] += val
+                
+                # 排序，找抽签号的排位（值高→排位小）
+                sorted_pos = sorted(pos_values.items(), key=lambda x: x[1], reverse=True)
+                for rank, (num, _) in enumerate(sorted_pos, 1):
+                    if num == draw_num:
+                        draw_value_rank = rank
+                        break
+        
+        # 命中率
+        stats = db.execute(
+            "SELECT COALESCE(SUM(rgs.hit_count),0) as hc, "
+            "COALESCE(SUM(rgs.total_days),0) as td "
+            "FROM run_group_stats rgs "
+            "WHERE rgs.run_group_id IN (SELECT id FROM run_groups WHERE summary_id=?)",
+            (s["id"],)
+        ).fetchone()
+        hit_rate = round(stats["hc"] / stats["td"] * 100, 1) if stats["td"] else 0
+        
+        result_list.append({
+            "name": s["name"], "projects": proj_count,
+            "hit_rate": hit_rate, "total_value": round(total_value, 2),
+            "draw_value_rank": draw_value_rank,
+        })
+
+    draw_rec = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+    return result_list, round(daily_amount, 2), draw_rec["draw_number"] if draw_rec else None, project_details, grid_details
+
+
+@app.post("/api/export/save-daily")
+def save_daily_snapshot(collection_id: int, date: str = None):
+    """手动触发：计算当日49格数据并存入 daily_snapshots + daily_project_snapshots"""
+    db = get_db()
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+
+    summaries_data, daily_amount, draw_number, project_details, grid_details = _compute_snapshot(db, collection_id, use_date)
+
+    saved = 0
+    for s in summaries_data:
+        sid = db.execute("SELECT id FROM summaries WHERE name=? AND collection_id=?", (s["name"], collection_id)).fetchone()
+        if not sid:
+            continue
+        db.execute(
+            "INSERT OR REPLACE INTO daily_snapshots (date, collection_id, draw_number, summary_id, summary_name, projects, hit_rate, total_value, draw_value_rank) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (use_date, collection_id, draw_number, sid[0], s["name"], s["projects"], s["hit_rate"], s["total_value"], s.get("draw_value_rank"))
+        )
+        saved += 1
+
+    # 项目明细
+    proj_saved = 0
+    for pname, sid, pid, pname_full, val, grid_cnt in project_details:
+        db.execute(
+            "INSERT OR REPLACE INTO daily_project_snapshots (date, collection_id, summary_id, summary_name, project_id, project_name, value) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (use_date, collection_id, sid, pname, pid, pname_full, val)
+        )
+        proj_saved += 1
+
+    # 排位明细
+    grid_saved = 0
+    for sn, pid, pname, cn, val, v47, cum in grid_details:
+        db.execute(
+            "INSERT INTO daily_grid_snapshots (date, collection_id, summary_name, project_id, project_name, count_n, value, value_x_47, cumulative_sum) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (use_date, collection_id, sn, pid, pname, cn, val, v47, cum)
+        )
+        grid_saved += 1
+
+    db.commit()
+    db.close()
+    return {"ok": True, "date": use_date, "draw_number": draw_number, "saved": saved, "proj_saved": proj_saved, "grid_saved": grid_saved, "daily_amount": daily_amount}
+
+
+@app.get("/api/export/daily-summary")
+def export_daily_summary(collection_id: int, date: str = None):
+    """读取 daily_snapshots 快照表（极快）。无快照时回退实时计算"""
+    db = get_db()
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+
+    # 先查快照表
+    rows = db.execute(
+        "SELECT summary_name, projects, hit_rate, total_value, draw_number, draw_value_rank "
+        "FROM daily_snapshots WHERE date=? AND collection_id=? ORDER BY summary_id",
+        (use_date, collection_id)
+    ).fetchall()
+
+    if rows:
+        daily_amount = sum(r["total_value"] for r in rows)
+        draw_number = rows[0]["draw_number"] if rows else None
+        day_rec = db.execute("SELECT day_seq FROM records WHERE date=?", (use_date,)).fetchone()
+        day_seq = day_rec["day_seq"] if day_rec else None
+        db.close()
+        return {
+            "date": use_date, "draw_number": draw_number, "day_seq": day_seq,
+            "summaries": [{"name": r["summary_name"], "projects": r["projects"], "hit_rate": r["hit_rate"], "total_value": r["total_value"], "draw_value_rank": r["draw_value_rank"]} for r in rows],
+            "daily_amount": daily_amount,
+            "source": "snapshot",
+        }
+
+    # 无快照 → 实时计算
+    summaries_data, daily_amount, draw_number, _, _ = _compute_snapshot(db, collection_id, use_date)
+    day_rec = db.execute("SELECT day_seq FROM records WHERE date=?", (use_date,)).fetchone()
+    day_seq = day_rec["day_seq"] if day_rec else None
+    db.close()
+    return {
+        "date": use_date, "draw_number": draw_number, "day_seq": day_seq,
+        "summaries": summaries_data, "daily_amount": daily_amount,
+        "source": "realtime",
+    }
+
+
+@app.get("/api/export/daily-detail")
+def export_daily_detail(collection_id: int, date: str = None):
+    """读取项目级快照：每个 summary 下的所有项目值"""
+    db = get_db()
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+
+    # 先查快照表
+    rows = db.execute(
+        "SELECT summary_name, project_id, project_name, value "
+        "FROM daily_project_snapshots WHERE date=? AND collection_id=? ORDER BY summary_id, project_id",
+        (use_date, collection_id)
+    ).fetchall()
+
+    if rows:
+        # 从排位快照表补充 grid_count
+        grid_counts = {}
+        grid_rows = db.execute(
+            "SELECT summary_name, project_id, COUNT(*) as cnt "
+            "FROM daily_grid_snapshots WHERE date=? AND collection_id=? "
+            "GROUP BY summary_name, project_id",
+            (use_date, collection_id)
+        ).fetchall()
+        for gr in grid_rows:
+            grid_counts[(gr["summary_name"], gr["project_id"])] = gr["cnt"]
+        db.close()
+        from collections import defaultdict
+        summaries = defaultdict(list)
+        for r in rows:
+            gc = grid_counts.get((r["summary_name"], r["project_id"]), 0)
+            summaries[r["summary_name"]].append({
+                "project_id": r["project_id"],
+                "project_name": r["project_name"],
+                "value": r["value"],
+                "grid_count": gc
+            })
+        return {"date": use_date, "summaries": dict(summaries), "source": "snapshot"}
+
+    # 无快照 → 实时计算
+    _, _, _, project_details, grid_details = _compute_snapshot(db, collection_id, use_date)
+    db.close()
+
+    from collections import defaultdict
+    summaries = defaultdict(list)
+    for pname, sid, pid, pname_full, val, grid_cnt in project_details:
+        summaries[pname].append({
+            "project_id": pid,
+            "project_name": pname_full,
+            "value": val,
+            "grid_count": grid_cnt
+        })
+
+    return {"date": use_date, "summaries": dict(summaries), "source": "computed"}
+
+
+@app.get("/api/export/grid-detail")
+def export_grid_detail(collection_id: int, date: str = None):
+    """读取排位级快照：每个项目下的 count_n、value、value_x_47、cumulative_sum"""
+    db = get_db()
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+
+    rows = db.execute(
+        "SELECT summary_name, project_id, project_name, count_n, value, value_x_47, cumulative_sum "
+        "FROM daily_grid_snapshots WHERE date=? AND collection_id=? ORDER BY summary_name, project_id, count_n",
+        (use_date, collection_id)
+    ).fetchall()
+
+    if rows:
+        db.close()
+        from collections import defaultdict
+        result = defaultdict(list)
+        for r in rows:
+            result[r["summary_name"]].append({
+                "project_id": r["project_id"],
+                "project_name": r["project_name"],
+                "count_n": r["count_n"],
+                "value": r["value"],
+                "value_x_47": r["value_x_47"],
+                "cumulative_sum": r["cumulative_sum"]
+            })
+        return {"date": use_date, "grids": dict(result), "source": "snapshot"}
+
+    _, _, _, _, grid_details = _compute_snapshot(db, collection_id, use_date)
+    db.close()
+
+    from collections import defaultdict
+    result = defaultdict(list)
+    for sn, pid, pname, cn, val, v47, cum in grid_details:
+        result[sn].append({
+            "project_id": pid, "project_name": pname,
+            "count_n": cn, "value": val, "value_x_47": v47, "cumulative_sum": cum
+        })
+    return {"date": use_date, "grids": dict(result), "source": "computed"}
+
+
+@app.get("/api/export/latest-snapshot-date")
+def latest_snapshot_date(collection_id: int):
+    """返回最新快照日期"""
+    db = get_db()
+    row = db.execute(
+        "SELECT MAX(date) as dt FROM daily_snapshots WHERE collection_id=?",
+        (collection_id,)
+    ).fetchone()
+    db.close()
+    return {"date": row["dt"] if row and row["dt"] else None}
+
+
+# ── 门店同步 ──────────────────────────────────
+STORE_SYNC_URL = "https://www.ct256.cn/funds-v2/api/external/push"
+STORE_API_KEY = "funds-v2-ext-2026"
+SYNC_CRON_FILE = os.path.join(os.path.dirname(__file__), "sync_cron.json")
+
+def _load_sync_cron():
+    if os.path.exists(SYNC_CRON_FILE):
+        with open(SYNC_CRON_FILE) as f:
+            return json.load(f)
+    return {"hour": 2, "minute": 0}
+
+def _save_sync_cron(cfg):
+    with open(SYNC_CRON_FILE, "w") as f:
+        json.dump(cfg, f)
+
+@app.get("/api/export/sync-cron")
+def get_sync_cron():
+    return _load_sync_cron()
+
+@app.put("/api/export/sync-cron")
+async def update_sync_cron(request: Request):
+    body = await request.json()
+    hour = max(0, min(23, int(body.get("hour", 2))))
+    minute = max(0, min(59, int(body.get("minute", 0))))
+    cfg = {"hour": hour, "minute": minute}
+    _save_sync_cron(cfg)
+    # 同步更新 cron 调度
+    import subprocess
+    subprocess.run(
+        ["/home/xiaolin/.local/bin/hermes", "cron", "edit", "e6796639506f",
+         "--schedule", f"{minute} {hour} * * *"],
+        capture_output=True, timeout=10
+    )
+    return {"ok": True, **cfg}
+
+@app.post("/api/export/sync-store")
+def sync_to_store(collection_id: int, date: str = None):
+    """同步当日数据到门店。采集汇总 → 推送到 funds-v2"""
+    import httpx
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        db_tmp = get_db()
+        rec = db_tmp.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+        db_tmp.close()
+
+    # 采集数据
+    db = get_db()
+    summaries_data, daily_amount, draw_number, _, _ = _compute_snapshot(db, collection_id, use_date)
+    db.close()
+
+    # 汇总名 → 门店
+    STORE_MAP = {
+        "B级汇总1": "一店", "B级汇总2": "二店", "B级汇总3": "三店",
+        "B级汇总4": "四店", "B级汇总5": "五店", "B级汇总6": "六店",
+    }
+
+    records = []
+    for s in (summaries_data or []):
+        store = STORE_MAP.get(s.get("name", ""))
+        if not store:
+            continue
+        amount = s.get("total_value") or 0
+        rank = s.get("draw_value_rank") or 0
+        records.append({
+            "id": f"{use_date}-{s['name']}",
+            "store": store,
+            "date": use_date,
+            "category": "income",
+            "amount": amount,
+            "note": f"排位 {rank}"
+        })
+
+    if not records:
+        return {"ok": True, "records": 0, "message": "无数据可推"}
+
+    # 推送
+    try:
+        resp = httpx.post(
+            STORE_SYNC_URL,
+            json={"records": records},
+            headers={"X-API-Key": STORE_API_KEY, "Content-Type": "application/json"},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"ok": True, "records": data.get("records", len(records)), "date": use_date, "details": records}
+        return {"ok": False, "error": f"推送失败 HTTP {resp.status_code}: {resp.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ==================== 启动 ====================
