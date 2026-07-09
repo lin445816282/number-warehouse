@@ -66,14 +66,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <body>
 
 <div class="header">
-  <div style="display:flex;justify-content:center;gap:6px;align-items:center">
-    <select id="collSelect" onchange="switchColl()" style="padding:4px 10px;border:1px solid #d0d5dd;border-radius:6px;font-size:14px;margin-right:4px">
-      <option value="19">A级集合 (汇总1-6)</option>
-      <option value="14">日汇总1-4</option>
-      <option value="16">日汇总1-6</option>
-    </select>
-    <div class="title">📊 每日汇总</div>
-  </div>
+  <div class="title" style="text-align:center;margin-bottom:12px">📊 每日汇总</div>
 </div>
 <div class="date-info" id="dateInfo">--</div>
 <div class="day-seq" id="daySeq"></div>
@@ -109,10 +102,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <div id="cardList"></div>
 
+<div class="divider" style="border-top:2px dashed #ddd;margin:20px 0;text-align:center;color:#999;font-size:12px">▼ 集合14</div>
+<div id="col14Amt" class="amount-box" style="background:linear-gradient(135deg,#e65100,#bf360c);margin-bottom:4px">
+  <div class="label">日汇总1-4 累计</div>
+  <div class="value">--</div>
+</div>
+<div id="col14List"></div>
+
+<div class="divider" style="border-top:2px dashed #ddd;margin:20px 0;text-align:center;color:#999;font-size:12px">▼ 集合16</div>
+<div id="col16Amt" class="amount-box" style="background:linear-gradient(135deg,#2e7d32,#1b5e20);margin-bottom:4px">
+  <div class="label">日汇总1-6 累计</div>
+  <div class="value">--</div>
+</div>
+<div id="col16List"></div>
+
 <script>
 const API = 'api/export';
-const urlParams = new URLSearchParams(window.location.search);
-const CID = parseInt(urlParams.get('cid')) || 19;
+const CID = 19;  // 固定A级集合
 let _summariesData = [];
 let _collName = '';
 
@@ -123,8 +129,6 @@ async function initCollection() {
     const data = await resp.json();
     _collName = data.collection_name;
     document.querySelector('.title').textContent = '📊 ' + _collName;
-    // 同步下拉框
-    document.getElementById('collSelect').value = CID;
     // 动态构建 filter chips
     const bar = document.getElementById('filterBar');
     bar.innerHTML = '<span class="filter-label">汇总筛选</span>';
@@ -139,11 +143,6 @@ async function initCollection() {
   } catch(e) {
     console.error('加载集合信息失败', e);
   }
-}
-
-function switchColl() {
-  const newCID = document.getElementById('collSelect').value;
-  window.location.search = '?cid=' + newCID;
 }
 
 // 筛选变化 → 重算累计
@@ -171,8 +170,13 @@ async function loadData() {
   document.getElementById('cardList').innerHTML = '<div class="loading">加载中...</div>';
   document.getElementById('dailyAmount').textContent = '--';
   document.getElementById('dateInfo').textContent = '加载中...';
+  document.getElementById('col14List').innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById('col16List').innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById('col14Amt').querySelector('.value').textContent = '--';
+  document.getElementById('col16Amt').querySelector('.value').textContent = '--';
   
   try {
+    // 主集合 19
     const [sumResp, detailResp, gridResp] = await Promise.all([
       fetch(API + '/daily-summary?collection_id=' + CID + '&date=' + date),
       fetch(API + '/daily-detail?collection_id=' + CID + '&date=' + date),
@@ -185,26 +189,56 @@ async function loadData() {
     document.getElementById('dateInfo').textContent = sumData.date + '  ·  抽签数' + (sumData.draw_number || '-');
     document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
     _summariesData = sumData.summaries || [];
-    onFilterChange();  // 按筛选重算累计
+    onFilterChange();
     
     if (!sumData.summaries || sumData.summaries.length === 0) {
       document.getElementById('cardList').innerHTML = '<div class="empty">暂无数据，请先采集</div>';
-      return;
+    } else {
+      document.getElementById('cardList').innerHTML = renderCards(sumData.summaries, detailData.summaries || {}, gridData.grids || {});
     }
     
-    const projMap = detailData.summaries || {};
-    const gridMap = gridData.grids || {};
-    let html = '';
-    sumData.summaries.forEach(s => {
-      const projects = projMap[s.name] || [];
-      const totalGrids = projects.reduce((acc,p) => acc + (p.grid_count || 0), 0);
-      const drawRank = s.draw_value_rank;
-      const drawRankHtml = drawRank ? ' <span class="draw-rank">排位 '+drawRank+'</span>' : '';
-      html += '<div class="card" onclick="toggleProj(this)"><div class="card-header"><div><div class="name">'+s.name+drawRankHtml+' <span class="card-arrow">▶</span></div><div class="meta">'+s.projects+' 项目 · 命中率 '+s.hit_rate+'%</div></div><div><div class="val">¥'+(s.total_value || 0).toLocaleString()+'</div><div class="rate">'+s.hit_rate+'%</div></div></div><div class="proj-list">'+buildProjList(s.name, projects, gridMap)+'</div></div>';
-    });
-    document.getElementById('cardList').innerHTML = html + '<div class="expand-hint">👆 点击卡片展开项目 & 排位明细</div>';
+    // 集合14 + 集合16 并行加载
+    renderCollection(14, date);
+    renderCollection(16, date);
   } catch(e) {
     document.getElementById('cardList').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function renderCards(summaries, projMap, gridMap) {
+  let html = '';
+  summaries.forEach(s => {
+    const projects = projMap[s.name] || [];
+    const drawRank = s.draw_value_rank;
+    const drawRankHtml = drawRank ? ' <span class="draw-rank">排位 '+drawRank+'</span>' : '';
+    html += '<div class="card" onclick="toggleProj(this)"><div class="card-header"><div><div class="name">'+s.name+drawRankHtml+' <span class="card-arrow">▶</span></div><div class="meta">'+s.projects+' 项目 · 命中率 '+s.hit_rate+'%</div></div><div><div class="val">¥'+(s.total_value || 0).toLocaleString()+'</div><div class="rate">'+s.hit_rate+'%</div></div></div><div class="proj-list">'+buildProjList(s.name, projects, gridMap)+'</div></div>';
+  });
+  return html + '<div class="expand-hint">👆 点击卡片展开项目 & 排位明细</div>';
+}
+
+async function renderCollection(cid, date) {
+  const listEl = document.getElementById('col'+cid+'List');
+  const amtEl = document.getElementById('col'+cid+'Amt');
+  if (!listEl || !amtEl) return;
+  try {
+    const [sumResp, detailResp, gridResp] = await Promise.all([
+      fetch(API + '/daily-summary?collection_id=' + cid + '&date=' + date),
+      fetch(API + '/daily-detail?collection_id=' + cid + '&date=' + date),
+      fetch(API + '/grid-detail?collection_id=' + cid + '&date=' + date)
+    ]);
+    const sumData = await sumResp.json();
+    const detailData = await detailResp.json();
+    const gridData = await gridResp.json();
+    const summaries = sumData.summaries || [];
+    if (summaries.length === 0) {
+      listEl.innerHTML = '<div class="empty">暂无数据</div>';
+      return;
+    }
+    const total = summaries.reduce((acc, s) => acc + (s.total_value || 0), 0);
+    amtEl.querySelector('.value').textContent = total.toLocaleString();
+    listEl.innerHTML = renderCards(summaries, detailData.summaries || {}, gridData.grids || {});
+  } catch(e) {
+    listEl.innerHTML = '<div class="empty">加载失败</div>';
   }
 }
 

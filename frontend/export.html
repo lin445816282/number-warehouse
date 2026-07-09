@@ -75,7 +75,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     <div class="title">📊 每日汇总</div>
   </div>
 </div>
-<div class="date-info" id="dateInfo">--</div>
+<div class="date-info"><span id="dateInfo">--</span><span id="formulaText" style="color:#9c27b0;font-size:12px"></span></div>
 <div class="day-seq" id="daySeq"></div>
 
 <div class="date-bar">
@@ -93,7 +93,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <button class="btn-collect" onclick="collectData()" id="btnCollect">📸 采集当日全量数据</button>
-<button class="btn-sync" onclick="syncToStore()" id="btnSync">🏪 同步到门店</button>
+<button class="btn-sync" onclick="oneKeySync()" id="btnSync">🚀 一键同步</button>
 
 <div class="cron-row">
   <span class="cron-label">⏰ 定时同步</span>
@@ -114,6 +114,8 @@ const API = 'api/export';
 const urlParams = new URLSearchParams(window.location.search);
 const CID = parseInt(urlParams.get('cid')) || 19;
 let _summariesData = [];
+let _gridFormulaData = []; // 集合16: 每个汇总的 v47 & cum 值
+let _drawNumber = null;
 let _collName = '';
 
 // 加载集合信息 → 动态构建筛选芯片
@@ -128,11 +130,19 @@ async function initCollection() {
     // 动态构建 filter chips
     const bar = document.getElementById('filterBar');
     bar.innerHTML = '<span class="filter-label">汇总筛选</span>';
+    if (CID === 16) {
+      const label = document.createElement('label');
+      label.className = 'filter-chip';
+      label.innerHTML = '<input type="checkbox" checked onchange="onFilterChange(this)" data-name="__all__">汇总1-汇总6';
+      bar.appendChild(label);
+    }
     data.summaries.forEach((s, i) => {
       const label = document.createElement('label');
       label.className = 'filter-chip';
       label.id = 'chip' + (i+1);
-      label.innerHTML = '<input type="checkbox" checked onchange="onFilterChange()" data-name="'+s.name+'">' + s.name;
+      const chipLabel = (CID === 16) ? ('汇总' + (i+1)) : s.name;
+      const chipName = (CID === 16) ? (s.name + '_' + i) : s.name;
+      label.innerHTML = '<input type="checkbox" checked onchange="onFilterChange(this)" data-name="'+chipName+'" data-idx="'+i+'">' + chipLabel;
       bar.appendChild(label);
     });
     // 默认全选中，初始累计需要等 loadData 后再算
@@ -146,13 +156,72 @@ function switchColl() {
   window.location.search = '?cid=' + newCID;
 }
 
-// 筛选变化 → 重算累计
-function onFilterChange() {
-  const checked = new Set();
-  document.querySelectorAll('.filter-chip input:checked').forEach(cb => checked.add(cb.dataset.name));
+// 筛选变化 → 重算累计 & 显隐卡片
+function onFilterChange(el) {
+  const allChip = document.querySelector('.filter-chip input[data-name="__all__"]');
+  
+  // 只有点击 __all__ 芯片才同步所有子芯片
+  if (allChip && el && el.dataset.name === '__all__') {
+    const chk = allChip.checked;
+    document.querySelectorAll('.filter-chip input[data-name]:not([data-name="__all__"])').forEach(cb => {
+      cb.checked = chk;
+      const idx = Array.from(document.querySelectorAll('.filter-chip input[data-name]:not([data-name="__all__"])')).indexOf(cb);
+      const card = document.querySelectorAll('.card')[idx];
+      if (card) card.style.display = chk ? '' : 'none';
+    });
+  }
+  
+  // 独立芯片: 各自显隐对应卡片
+  if (allChip && el && el.dataset.name !== '__all__') {
+    const idx = Array.from(document.querySelectorAll('.filter-chip input[data-name]:not([data-name="__all__"])')).indexOf(el);
+    const card = document.querySelectorAll('.card')[idx];
+    if (card) card.style.display = el.checked ? '' : 'none';
+  }
+  
+  // 更新 __all__ 状态（子芯片全选→勾上，否则取消）
+  if (allChip && el && el.dataset.name !== '__all__') {
+    const subs = document.querySelectorAll('.filter-chip input[data-name]:not([data-name="__all__"])');
+    allChip.checked = Array.from(subs).every(cb => cb.checked);
+  }
+  
+  // 重算累计
+  const isC16 = CID === 16;
   let total = 0;
-  _summariesData.forEach(s => { if (checked.has(s.name)) total += (s.total_value || 0); });
+  if (isC16) {
+    // 集合16: 直接用idx匹配（芯片名和_summariesData名不同）
+    const chips = document.querySelectorAll('.filter-chip input[data-idx]');
+    chips.forEach(cb => {
+      if (cb.checked) {
+        const idx = parseInt(cb.dataset.idx);
+        total += (_summariesData[idx]?.total_value || 0);
+      }
+    });
+  } else {
+    const checked = new Set();
+    document.querySelectorAll('.filter-chip input:checked').forEach(cb => checked.add(cb.dataset.name));
+    _summariesData.forEach(s => { if (checked.has(s.name)) total += (s.total_value || 0); });
+  }
   document.getElementById('dailyAmount').textContent = total.toLocaleString();
+  // 集合16: 更新公式
+  if (isC16) updateFormula();
+}
+
+function updateFormula() {
+  if (!_drawNumber) return;
+  let v47 = 0, cum = 0;
+  document.querySelectorAll('.filter-chip input[data-idx]').forEach(cb => {
+    if (cb.checked) {
+      const idx = parseInt(cb.dataset.idx);
+      const d = _gridFormulaData[idx] || {v47: 0, cum: 0};
+      v47 += d.v47;
+      cum += d.cum;
+    }
+  });
+  const result = v47 * 47 - cum;
+  const formulaSpan = document.getElementById('formulaText');
+  if (formulaSpan) {
+    formulaSpan.innerHTML = '→ 抽#' + _drawNumber + ' = ' + v47.toLocaleString() + ' × 47 − ' + cum.toLocaleString() + ' = ' + result.toLocaleString();
+  }
 }
 
 // 默认取最新快照日期
@@ -185,6 +254,25 @@ async function loadData() {
     document.getElementById('dateInfo').textContent = sumData.date + '  ·  抽签数' + (sumData.draw_number || '-');
     document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
     _summariesData = sumData.summaries || [];
+    
+    // 集合16: 存分项公式数据
+    if (CID === 16 && sumData.draw_number) {
+      _drawNumber = sumData.draw_number;
+      const dn = sumData.draw_number;
+      const grids = gridData.grids || {};
+      const summaryNames = Object.keys(grids);
+      // 按 summaryIdx → {v47, cum} 累加
+      _gridFormulaData = new Array(summaryNames.length).fill(null).map(() => ({v47: 0, cum: 0}));
+      summaryNames.forEach((sn, si) => {
+        grids[sn].forEach(g => {
+          if (g.count_n === dn) {
+            _gridFormulaData[si].v47 += (g.value_x_47 || 0);
+            _gridFormulaData[si].cum += (g.cumulative_sum || 0);
+          }
+        });
+      });
+    }
+    
     onFilterChange();  // 按筛选重算累计
     
     if (!sumData.summaries || sumData.summaries.length === 0) {
@@ -236,12 +324,28 @@ function toggleGrid(item) {
 async function collectData() {
   const btn = document.getElementById('btnCollect');
   btn.disabled = true;
-  btn.textContent = '⏳ 采集中...';
   const date = document.getElementById('dateInput').value;
+  
   try {
+    btn.textContent = '⏳ 采集集合19...';
     const resp = await fetch(API + '/save-daily?collection_id=' + CID + '&date=' + date, { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = '✅ 已存: '+data.saved+'汇/'+data.proj_saved+'项/'+data.grid_saved+'排位';
+    
+    // 集合19采集完 → 自动补缺14/16
+    let msg14 = '', msg16 = '';
+    if (CID === 19 && data.ok) {
+      btn.textContent = '⏳ 补缺集合14...';
+      const r14 = await fetch(API + '/save-daily?collection_id=14&date=' + date, { method: 'POST' });
+      const d14 = await r14.json();
+      msg14 = ' 14:' + d14.saved + '汇';
+      
+      btn.textContent = '⏳ 补缺集合16...';
+      const r16 = await fetch(API + '/save-daily?collection_id=16&date=' + date, { method: 'POST' });
+      const d16 = await r16.json();
+      msg16 = ' 16:' + d16.saved + '汇';
+    }
+    
+    btn.textContent = '✅ 19:' + data.saved + '汇' + msg14 + msg16;
     setTimeout(function(){ btn.textContent = '📸 采集当日全量数据'; btn.disabled = false; }, 3000);
     loadData();
   } catch(e) {
@@ -250,24 +354,32 @@ async function collectData() {
   }
 }
 
-async function syncToStore() {
+async function oneKeySync() {
   const btn = document.getElementById('btnSync');
   btn.disabled = true;
-  btn.textContent = '⏳ 同步中...';
   const date = document.getElementById('dateInput').value;
-  try {
-    const resp = await fetch(API + '/sync-store?collection_id=' + CID + '&date=' + date, { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      btn.textContent = '✅ 已同步';
-    } else {
-      btn.textContent = '❌ ' + (data.error || '失败');
-    }
-    setTimeout(function(){ btn.textContent = '🏪 同步到门店'; btn.disabled = false; }, 3000);
-  } catch(e) {
-    btn.textContent = '❌ 网络错误';
-    btn.disabled = false;
+  
+  // 集合14/16：先采集再同步，同时推个体门店
+  const cids = (CID === 14 || CID === 16) ? [14, 16] : [CID];
+  
+  btn.textContent = '⏳ 采集中...';
+  for (const cid of cids) {
+    await fetch(API + '/save-daily?collection_id=' + cid + '&date=' + date, { method: 'POST' });
   }
+  
+  btn.textContent = '⏳ 同步中...';
+  let ok = true, msg = '';
+  try {
+    for (const cid of cids) {
+      const resp = await fetch(API + '/sync-store?collection_id=' + cid + '&date=' + date, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) { ok = false; msg = data.error || '失败'; break; }
+    }
+  } catch(e) { ok = false; msg = '网络错误'; }
+  
+  btn.textContent = ok ? '✅ 已同步' : ('❌ ' + msg);
+  loadData();
+  setTimeout(() => { btn.textContent = '🚀 一键同步'; btn.disabled = false; }, 3000);
 }
 
 document.getElementById('dateInput').addEventListener('change', loadData);

@@ -1890,20 +1890,25 @@ const allSelected = computed(() => selectedSummaryIds.value.length === 0)
 function stripGrade(name) {
   return name.replace(/^[A-Z]级\s*/, '')
 }
-const gridTotalSum = computed(() => {
-  if (!grid49.value?.grid) return 0
-  return grid49.value.grid.reduce((s, g) => s + (g.value || 0), 0)
-})
-const gridDrawVal = computed(() => {
-  const dn = grid49.value?.draw_number
-  if (!dn || !grid49.value?.grid) return null
-  const cell = grid49.value.grid.find(g => g.n === dn)
-  return cell ? cell.value : null
-})
-const gridResult = computed(() => {
-  if (gridDrawVal.value == null) return null
-  return gridDrawVal.value * 47 - gridTotalSum.value
-})
+const gridTotalSum = ref(0)
+const gridDrawVal = ref(null)
+const gridResult = ref(null)
+
+function recalcFormula() {
+  const g = grid49.value
+  if (!g?.grid?.length) { gridTotalSum.value = 0; gridDrawVal.value = null; gridResult.value = null; return }
+  gridTotalSum.value = g.grid.reduce((s, c) => s + (c.value || 0), 0)
+  const dn = g.draw_number
+  if (dn) {
+    const cell = g.grid.find(c => c.n === dn)
+    gridDrawVal.value = cell ? cell.value : null
+    gridResult.value = gridDrawVal.value != null ? gridDrawVal.value * 47 - gridTotalSum.value : null
+  } else {
+    gridDrawVal.value = null
+    gridResult.value = null
+  }
+}
+watch(grid49, recalcFormula, { deep: true })
 
 // 数字归属：1-49 → 汇总名
 const numSummaryMap = ref(null)
