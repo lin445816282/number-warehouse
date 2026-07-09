@@ -3326,9 +3326,62 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         else:
             proj_saved = 0
 
-        # ── 存汇总（排位直接从集合19读取，每个汇总独立）──
+        # ── 存汇总（排位独立计算：聚合19的前max_n个汇总的sim_results → 算1-49排位）──
         saved = 0
         daily_amount = 0
+
+        # 从集合19的前max_n个汇总的项目中拉sim_results，独立算排位
+        rank_collection = None
+        if dn and src_names:
+            src_sids = [r["summary_id"] if "summary_id" in r.keys() else
+                        db.execute("SELECT id FROM summaries WHERE name=? AND collection_id=19",
+                                   (r["summary_name"],)).fetchone()
+                        for r in src_rows[:max_n]]
+            src_sids = [s[0] if s else None for s in src_sids]
+            src_sids = [s for s in src_sids if s]
+
+            if src_sids:
+                # 获取这些汇总下的所有项目ID
+                sids_str = ",".join("?" * len(src_sids))
+                pids = [r[0] for r in db.execute(
+                    f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+                    f"JOIN run_groups rg ON rgi.run_group_id = rg.id "
+                    f"WHERE rg.summary_id IN ({sids_str})", src_sids
+                ).fetchall()]
+
+                if pids:
+                    pids_str = ",".join("?" * len(pids))
+                    sr_rows = db.execute(
+                        f"SELECT sr.count_n, sr.numbers_json "
+                        f"FROM sim_results sr "
+                        f"JOIN sim_runs srn ON sr.run_id = srn.id "
+                        f"WHERE srn.project_id IN ({pids_str}) AND sr.date=? "
+                        f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+                        pids + [use_date]
+                    ).fetchall()
+
+                    if sr_rows:
+                        cv_map = {}
+                        cv_rows = db.execute(
+                            "SELECT count_n, value FROM count_value_map"
+                        ).fetchall()
+                        for cv in cv_rows:
+                            cv_map[cv["count_n"]] = cv["value"]
+
+                        pos_values = {n: 0 for n in range(1, 50)}
+                        for sr in sr_rows:
+                            nums = json.loads(sr["numbers_json"])
+                            val = cv_map.get(sr["count_n"], 0)
+                            for num in nums:
+                                if 1 <= num <= 49:
+                                    pos_values[num] += val
+
+                        sorted_pos = sorted(pos_values.items(), key=lambda x: x[1], reverse=True)
+                        for rk_pos, (num, _) in enumerate(sorted_pos, 1):
+                            if num == dn:
+                                rank_collection = rk_pos
+                                break
+
         for i, r in enumerate(src_rows):
             if i >= max_n:
                 break
@@ -3340,7 +3393,7 @@ def save_daily_snapshot(collection_id: int, date: str = None):
             if not sid:
                 continue
             val = r["total_value"]
-            rk = r["draw_value_rank"]
+            rk = rank_collection  # 集合级统一排位
             db.execute(
                 "INSERT OR REPLACE INTO daily_snapshots (date, collection_id, draw_number, summary_id, summary_name, projects, hit_rate, total_value, draw_value_rank) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3350,6 +3403,15 @@ def save_daily_snapshot(collection_id: int, date: str = None):
             saved += 1
 
         db.commit()
+
+        # ── 同步写入 collection_meta ──
+        db.execute(
+            "INSERT OR REPLACE INTO collection_meta (collection_id, date, draw_number, result, rank) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (collection_id, use_date, dn, round(daily_amount, 2), rank_collection)
+        )
+        db.commit()
+
         db.close()
         return {"ok": True, "date": use_date, "draw_number": dn, "saved": saved,
                 "proj_saved": proj_saved, "grid_saved": grid_saved, "daily_amount": round(daily_amount, 2),
@@ -3598,7 +3660,7 @@ def latest_snapshot_date(collection_id: int):
 
 
 # ── 门店同步 ──────────────────────────────────
-STORE_SYNC_URL = "https://www.ct256.cn/funds-v2/api/external/push"
+STORE_SYNC_URL = "http://localhost:8009/api/external/push"
 STORE_API_KEY = "funds-v2-ext-2026"
 SYNC_CRON_FILE = os.path.join(os.path.dirname(__file__), "sync_cron.json")
 
@@ -3646,64 +3708,24 @@ def sync_to_store(collection_id: int, date: str = None):
         use_date = rec["dt"] or dt.today().isoformat()
         db_tmp.close()
 
-    # ── 集合14/16：从集合19拉当日快照，排位已存表里直接读 ──
+    # ── 抽签号校验：当日抽签数未出则不允许同步 ──
+    db_chk = get_db()
+    draw_chk = db_chk.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+    db_chk.close()
+    if not draw_chk or draw_chk["draw_number"] is None:
+        return {"ok": False, "error": f"{use_date} 抽签号尚未公布，禁止同步空数据"}
+
+    # ── 集合14/16：从 collection_meta 表读取 ──
     if collection_id in (14, 16):
         db = get_db()
-        max_n = 4 if collection_id == 14 else 6
-        src_rows = db.execute(
-            "SELECT summary_name, total_value, draw_value_rank "
-            "FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id",
-            (use_date,)
-        ).fetchall()
-
-        if not src_rows:
-            db.close()
-            return {"ok": True, "records": 0, "message": "集合19当日无快照，请先采集"}
-
-        # ── 合集排位：合并所有汇总的sim_results ──
-        combined_rank = None
-        src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
-        dn_rec = db.execute("SELECT draw_number FROM daily_snapshots WHERE date=? AND collection_id=19 LIMIT 1", (use_date,)).fetchone()
-        dn = dn_rec["draw_number"] if dn_rec else None
-        if dn and src_names:
-            import json
-            cv_rows = db.execute("SELECT count_n, value FROM count_value_map").fetchall()
-            cv_map = {r["count_n"]: r["value"] for r in cv_rows}
-            all_sr = []
-            for sn in src_names:
-                proj_rows = db.execute("""
-                    SELECT DISTINCT rgi.project_id FROM run_group_items rgi
-                    JOIN run_groups rg ON rg.id=rgi.run_group_id
-                    JOIN summaries s ON s.id=rg.summary_id
-                    WHERE s.collection_id=19 AND s.name=?
-                """, (sn,)).fetchall()
-                pids = [pr["project_id"] for pr in proj_rows]
-                if pids:
-                    ph = ",".join("?"*len(pids))
-                    sr = db.execute(f"""
-                        SELECT sr.count_n, sr.numbers_json FROM sim_results sr
-                        JOIN sim_runs srn ON sr.run_id=srn.id
-                        WHERE srn.project_id IN ({ph}) AND sr.date=?
-                        AND srn.id=(SELECT MAX(id) FROM sim_runs WHERE project_id=srn.project_id)
-                    """, pids+[use_date]).fetchall()
-                    all_sr.extend(sr)
-            if all_sr:
-                pv = {n:0 for n in range(1,50)}
-                for row in all_sr:
-                    for num in json.loads(row["numbers_json"]):
-                        if 1<=num<=49: pv[num]+=cv_map.get(row["count_n"],0)
-                for i,(num,_) in enumerate(sorted(pv.items(),key=lambda x:x[1],reverse=True),1):
-                    if num==dn: combined_rank=i; break
-
-        summaries_data = []
-        for i, r in enumerate(src_rows):
-            if i >= max_n: break
-            summaries_data.append({
-                "name": f"当日汇总{i+1}", "projects": 0, "hit_rate": 0,
-                "total_value": r["total_value"], "draw_value_rank": r["draw_value_rank"],
-            })
-        summaries_data[0]["combined_rank"] = combined_rank if summaries_data else None
+        meta = db.execute(
+            "SELECT draw_number, result, rank FROM collection_meta WHERE collection_id=? AND date=?",
+            (collection_id, use_date)
+        ).fetchone()
         db.close()
+
+        if not meta:
+            return {"ok": True, "records": 0, "message": "该集合当日无数据，请先采集"}
     else:
         # 正常集合：从项目计算
         db = get_db()
@@ -3723,11 +3745,10 @@ def sync_to_store(collection_id: int, date: str = None):
 
     records = []
     if collection_id in DIR_STORE:
-        # ── 集合级总计 → 独立门店（合集排位从所有汇总合并算） ──
+        # ── 集合级总计 → 独立门店，从 collection_meta 读 ──
         store = DIR_STORE[collection_id]
-        total = sum(s["total_value"] for s in (summaries_data or []))
-        # 合集排位：合并所有汇总
-        rank = summaries_data[0].get("combined_rank") if summaries_data else None
+        total = meta["result"]
+        rank = meta["rank"]
         records.append({
             "id": f"{use_date}-col{collection_id}-income",
             "store": store,
@@ -3744,29 +3765,6 @@ def sync_to_store(collection_id: int, date: str = None):
             "amount": rank or 0,
             "note": f"集合{collection_id} 排位{rank} ¥{total:,.0f}"
         })
-        # ── 同时推个体汇总 → 对应门店 ──
-        for s in (summaries_data or []):
-            ind_store = STORE_MAP.get(s.get("name", ""))
-            if not ind_store:
-                continue
-            amount = s.get("total_value") or 0
-            rk = s.get("draw_value_rank") or 0
-            records.append({
-                "id": f"{use_date}-{s['name']}-income",
-                "store": ind_store,
-                "date": use_date,
-                "category": "income",
-                "amount": amount,
-                "note": f"排位 {rk}"
-            })
-            records.append({
-                "id": f"{use_date}-{s['name']}-cat",
-                "store": ind_store,
-                "date": use_date,
-                "category": "cat_1783487972049",
-                "amount": rk,
-                "note": f"排位 {rk}  ·  ¥{amount:,.0f}"
-            })
     else:
         for s in (summaries_data or []):
             store = STORE_MAP.get(s.get("name", ""))
