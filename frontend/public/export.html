@@ -61,6 +61,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .loading { text-align:center; padding:40px; color:#999; }
 .empty { text-align:center; padding:40px; color:#999; font-size:14px; }
 .expand-hint { font-size:11px; color:#ccc; text-align:center; margin-top:2px; }
+.meta-card { flex:1; border-radius:10px; padding:12px; text-align:center; color:#fff; }
+.meta-card .mc-label { font-size:11px; opacity:.85; }
+.meta-card .mc-result { font-size:22px; font-weight:700; margin:4px 0; }
+.meta-card .mc-rank { font-size:13px; opacity:.9; }
 </style>
 </head>
 <body>
@@ -101,6 +105,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <div id="cardList"></div>
+
+<div style="margin-top:16px;display:flex;gap:10px" id="metaCards"></div>
 
 <script>
 const API = 'api/export';
@@ -172,6 +178,7 @@ async function loadData() {
     document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
     _summariesData = sumData.summaries || [];
     onFilterChange();
+    loadMetaCards(date);
     
     if (!sumData.summaries || sumData.summaries.length === 0) {
       document.getElementById('cardList').innerHTML = '<div class="empty">暂无数据，请先采集</div>';
@@ -226,9 +233,12 @@ async function collectData() {
   btn.textContent = '⏳ 采集中...';
   const date = document.getElementById('dateInput').value;
   try {
-    const resp = await fetch(API + '/save-daily?collection_id=' + CID + '&date=' + date, { method: 'POST' });
+    const resp = await fetch(API + '/collect-today?date=' + date, { method: 'POST' });
     const data = await resp.json();
-    btn.textContent = '✅ 已存: '+data.saved+'汇/'+data.proj_saved+'项/'+data.grid_saved+'排位';
+    const r19 = data.results['19'] || {};
+    const r14 = data.results['14'] || {};
+    const r16 = data.results['16'] || {};
+    btn.textContent = '✅ 集合19:'+(r19.saved||0)+' 集合14/16已存';
     setTimeout(function(){ btn.textContent = '📸 采集当日全量数据'; btn.disabled = false; }, 3000);
     loadData();
   } catch(e) {
@@ -292,6 +302,26 @@ async function saveCron() {
       toggleCronEdit();
     }
   } catch(e) {}
+}
+
+// 集合14/16元数据卡片（纯读表，零计算）
+async function loadMetaCards(date) {
+  try {
+    const resp = await fetch('api/export/collection-meta?date=' + date);
+    const data = await resp.json();
+    const colors = {14: '#2196F3', 16: '#E91E63'};
+    let html = '';
+    (data.collections || []).forEach(c => {
+      html += '<div class="meta-card" style="background:'+(colors[c.collection_id]||'#666')+'">' +
+        '<div class="mc-label">集合' + c.collection_id + ' · ' + (c.draw_number||'-') + '</div>' +
+        '<div class="mc-result">' + (c.result||'--') + '</div>' +
+        '<div class="mc-rank">排位 ' + (c.rank||'--') + '</div>' +
+      '</div>';
+    });
+    document.getElementById('metaCards').innerHTML = html || '<div style="color:#999;font-size:13px;padding:8px">无 meta 数据</div>';
+  } catch(e) {
+    document.getElementById('metaCards').innerHTML = '';
+  }
 }
 
 // 初始化

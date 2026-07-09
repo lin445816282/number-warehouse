@@ -43,7 +43,7 @@ DEFAULT_MAPPING = [
 
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(DB_PATH, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     return db
@@ -1449,6 +1449,16 @@ def run_simulation(db, rule_id: int, start_date: str, end_date: str, project_id:
             (process_dates[-1] if process_dates else end_date, total_days, hit_count, run_id)
         )
     db.commit()
+
+    # 自动刷新该项目所在的所有记录组统计
+    rg_items = db.execute(
+        "SELECT DISTINCT run_group_id FROM run_group_items WHERE sim_run_id=? AND run_group_id IS NOT NULL",
+        (run_id,)
+    ).fetchall()
+    for rg in rg_items:
+        _refresh_run_group_stats(db, rg["run_group_id"])
+    if rg_items:
+        db.commit()
 
     msg = f"演算完成 {total_days}天 {hit_count}命中"
     if start_was_adjusted or end_was_adjusted:
@@ -3260,7 +3270,7 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         if not src_rows:
             db.close()
             return {"ok": True, "date": use_date, "draw_number": None, "saved": 0,
-                    "proj_saved": 0, "grid_saved": 0, "daily_amount": 0,
+                    "daily_amount": 0,
                     "message": "集合19当日无快照，请先采集"}
 
         draw_rec = db.execute(
@@ -3269,68 +3279,13 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         ).fetchone()
         dn = draw_rec["draw_number"] if draw_rec else None
 
-        # ── 先存grid ──
-        src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
-        if src_names:
-            db.execute(
-                "DELETE FROM daily_grid_snapshots WHERE date=? AND collection_id=?",
-                (use_date, collection_id)
-            )
-            placeholders = ",".join("?" * len(src_names))
-            grid_rows = db.execute(f"""
-                SELECT summary_name, count_n, value, value_x_47, cumulative_sum
-                FROM daily_grid_snapshots
-                WHERE collection_id=19 AND date=?
-                AND summary_name IN ({placeholders})
-                ORDER BY summary_name, count_n
-            """, [use_date] + src_names).fetchall()
-
-            grid_saved = 0
-            for gr in grid_rows:
-                db.execute(
-                    "INSERT INTO daily_grid_snapshots (date, collection_id, summary_name, project_id, project_name, count_n, value, value_x_47, cumulative_sum) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (use_date, collection_id, gr["summary_name"], 0, "累计",
-                     gr["count_n"], gr["value"], gr["value_x_47"], gr["cumulative_sum"])
-                )
-                grid_saved += 1
-        else:
-            grid_saved = 0
-
-        # ── 存项目快照（从集合19复制，映射汇总名）──
-        name_map = {}
-        for i, r in enumerate(src_rows):
-            if i < max_n:
-                name_map[r["summary_name"]] = f"当日汇总{i+1}"
-        db.execute(
-            "DELETE FROM daily_project_snapshots WHERE date=? AND collection_id=?",
-            (use_date, collection_id)
-        )
-        if name_map:
-            placeholders = ",".join("?" * len(name_map))
-            proj_rows = db.execute(f"""
-                SELECT summary_name, project_id, project_name, value
-                FROM daily_project_snapshots
-                WHERE collection_id=19 AND date=?
-                AND summary_name IN ({placeholders})
-            """, [use_date] + list(name_map.keys())).fetchall()
-            proj_saved = 0
-            for pr in proj_rows:
-                tgt_name = name_map.get(pr["summary_name"], pr["summary_name"])
-                db.execute(
-                    "INSERT INTO daily_project_snapshots (date, collection_id, summary_name, project_id, project_name, value) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (use_date, collection_id, tgt_name, pr["project_id"], pr["project_name"], pr["value"])
-                )
-                proj_saved += 1
-        else:
-            proj_saved = 0
-
         # ── 存汇总（排位独立计算：聚合19的前max_n个汇总的sim_results → 算1-49排位）──
         saved = 0
-        daily_amount = 0
+        # daily_amount：直接从集合19的前max_n个汇总累加
+        daily_amount = sum((r["total_value"] or 0) for i, r in enumerate(src_rows) if i < max_n)
 
         # 从集合19的前max_n个汇总的项目中拉sim_results，独立算排位
+        src_names = [r["summary_name"] for i, r in enumerate(src_rows) if i < max_n]
         rank_collection = None
         if dn and src_names:
             src_sids = [r["summary_id"] if "summary_id" in r.keys() else
@@ -3399,7 +3354,6 @@ def save_daily_snapshot(collection_id: int, date: str = None):
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (use_date, collection_id, dn, sid[0], tgt_name, 0, 0, val, rk)
             )
-            daily_amount += (val or 0)
             saved += 1
 
         db.commit()
@@ -3414,11 +3368,15 @@ def save_daily_snapshot(collection_id: int, date: str = None):
 
         db.close()
         return {"ok": True, "date": use_date, "draw_number": dn, "saved": saved,
-                "proj_saved": proj_saved, "grid_saved": grid_saved, "daily_amount": round(daily_amount, 2),
-                "message": f"从A级集合累计 {max_n} 个汇总 + {grid_saved} 格 + {proj_saved} 项目"}
+                "daily_amount": round(daily_amount, 2),
+                "message": f"从A级集合累计 {max_n} 个汇总，存入 collection_meta"}
 
     # ── 正常集合：从项目计算 ──
     summaries_data, daily_amount, draw_number, project_details, grid_details = _compute_snapshot(db, collection_id, use_date)
+
+    # 先清除当日旧数据，防止重复采集累积
+    db.execute("DELETE FROM daily_project_snapshots WHERE date=? AND collection_id=?", (use_date, collection_id))
+    db.execute("DELETE FROM daily_grid_snapshots WHERE date=? AND collection_id=?", (use_date, collection_id))
 
     saved = 0
     for s in summaries_data:
@@ -3455,6 +3413,20 @@ def save_daily_snapshot(collection_id: int, date: str = None):
     db.commit()
     db.close()
     return {"ok": True, "date": use_date, "draw_number": draw_number, "saved": saved, "proj_saved": proj_saved, "grid_saved": grid_saved, "daily_amount": daily_amount}
+
+
+@app.post("/api/export/collect-today")
+def collect_today(date: str = None):
+    """一键采集当日：集合19 → 集合14 → 集合16"""
+    steps = [19, 14, 16]
+    results = {}
+    for cid in steps:
+        try:
+            r = save_daily_snapshot(cid, date)
+            results[str(cid)] = r
+        except Exception as e:
+            results[str(cid)] = {"ok": False, "error": str(e)}
+    return {"ok": True, "results": results}
 
 
 @app.get("/api/export/daily-summary")
@@ -3657,6 +3629,25 @@ def latest_snapshot_date(collection_id: int):
     ).fetchone()
     db.close()
     return {"date": row["dt"] if row and row["dt"] else None}
+
+
+@app.get("/api/export/collection-meta")
+def get_collection_meta(date: str):
+    """读取集合14/16的collection_meta数据（纯读表，零计算）"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT collection_id, draw_number, result, rank FROM collection_meta WHERE date=? ORDER BY collection_id",
+        (date,)
+    ).fetchall()
+    db.close()
+    return {
+        "date": date,
+        "collections": [
+            {"collection_id": r["collection_id"], "draw_number": r["draw_number"],
+             "result": r["result"], "rank": r["rank"]}
+            for r in rows
+        ]
+    }
 
 
 # ── 门店同步 ──────────────────────────────────
