@@ -749,7 +749,7 @@
             <button class="btn-add-sm" @click="copyBottom24" title="复制后24号码(值最大→小后24)">📋24</button>
           </div>
         </div>
-        <div v-if="summaries.length" class="sum-chips">
+        <div v-if="summaries.length && !sumSel" class="sum-chips">
           <span v-for="s in summaries" :key="s.id" class="sum-chip"
                 :class="{active: allSelected || selectedSummaryIds.includes(s.id)}"
                 @click="toggleSummary(s.id)">{{ stripGrade(s.name) }}</span>
@@ -952,10 +952,15 @@
           <option v-for="rg in scopeRunGroups" :key="'rg'+rg.id" :value="'r'+rg.id">📋 {{ rg.name }} ({{ rg.project_count }}项)</option>
         </select>
         <div v-if="scopeProjects.length" style="margin-top:12px">
-          <div class="sim-subtitle-sm">将演算 {{ scopeProjects.length }} 个项目：</div>
-          <div v-for="p in scopeProjects" :key="p.project_id" class="scope-proj-row">
-            <span>{{ p.project_name }}</span>
-            <span class="scope-rule-tag">{{ p.rule_name || '⚠ 无规则' }}</span>
+          <div class="scope-toggle" @click="trProjectsExpanded=!trProjectsExpanded">
+            <span>将演算 {{ scopeProjects.length }} 个项目</span>
+            <span class="scope-toggle-arrow" :class="{open:trProjectsExpanded}">▶</span>
+          </div>
+          <div v-if="trProjectsExpanded" class="scope-proj-wrap">
+            <div v-for="p in scopeProjects" :key="p.project_id" class="scope-proj-row">
+              <span>{{ p.project_name }}</span>
+              <span class="scope-rule-tag">{{ p.rule_name || '⚠ 无规则' }}</span>
+            </div>
           </div>
         </div>
         <div v-else-if="trL3 !== 'all'" class="gs-empty" style="padding:16px 0">所选范围下无项目</div>
@@ -2283,6 +2288,7 @@ function openRunDialog() {
 const showTodayRun = ref(false)
 const todayRunDate = ref(todayStr)
 const todayRunRunning = ref(false)
+const trProjectsExpanded = ref(false)
 const trL3 = ref('all'), trL2 = ref(''), trL1 = ref('')
 const trCID = computed(() => trL3.value !== 'all')
 const trSID = computed(() => trCID.value && trL2.value !== '')
@@ -2297,13 +2303,14 @@ function openTodayRun() {
   todayRunDate.value = todayStr
   trL3.value = 'all'; trL2.value = ''; trL1.value = ''
   scopeSummaries.value = []; scopeRunGroups.value = []; scopeProjects.value = []
+  trProjectsExpanded.value = false
   showTodayRun.value = true
   // 初始即为全项目模式，手动触发加载
   onTrL3Change()
 }
 
 async function onTrL3Change() {
-  trL2.value = ''; trL1.value = ''; scopeRunGroups.value = []
+  trL2.value = ''; trL1.value = ''; scopeRunGroups.value = []; trProjectsExpanded.value = false
   if (trL3.value === 'all') { scopeSummaries.value = []; await loadTrAllProjects(); return }
   const cid = parseInt(trL3.value.slice(1))
   try { const r = await fetch(`${API}/collections/${cid}/summaries`); scopeSummaries.value = await r.json() } catch(e) { scopeSummaries.value = [] }
@@ -2972,6 +2979,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .g49-pv { font-weight: 700; color: #22c55e; }
 
 /* ===== 演算当天 ===== */
+.scope-toggle { display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:#f0f4f8;border-radius:8px;cursor:pointer;font-size:13px;color:#1a2a4a;user-select:none }
+.scope-toggle-arrow { font-size:10px;transition:transform .2s;color:#8899b0 }
+.scope-toggle-arrow.open { transform:rotate(90deg) }
+.scope-proj-wrap { margin-top:8px }
 .scope-proj-row { display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f8fafc;border-radius:8px;margin-bottom:4px;font-size:13px }
 .scope-rule-tag { font-size:11px;background:#eef3ff;color:#4da6ff;padding:2px 8px;border-radius:6px }
 
