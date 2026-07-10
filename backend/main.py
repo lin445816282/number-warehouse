@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from typing import Optional
 import sqlite3
 
+from auth import auth_router, AuthMiddleware, init_auth_db
+
 app = FastAPI(title="数字仓库轮换系统")
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "warehouse.db")
 
@@ -3847,9 +3849,14 @@ def reset_direct_mapping(num: int):
 
 # ==================== 启动 ====================
 init_db()
+init_auth_db()
 
 # 静态文件
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+# 认证中间件（在 no-cache 之后添加，会包裹它）
+app.include_router(auth_router)
+app.add_middleware(AuthMiddleware)
 
 @app.middleware("http")
 async def add_no_cache_header(request: Request, call_next):

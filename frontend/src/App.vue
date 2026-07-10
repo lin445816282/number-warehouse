@@ -2,7 +2,7 @@
   <div class="app">
     <div class="top-bar">
       <span class="tb-title">🔢 数字仓库</span>
-      <span class="tb-date">{{ todayStr }}</span>
+      <span class="tb-date">{{ todayStr }} <button class="tb-logout" @click="doLogout">退出</button></span>
     </div>
 
     <!-- 视图切换 -->
@@ -846,7 +846,7 @@
           <span class="col-card-value" style="color:#22c55e;font-weight:700">¥{{ (getProjGrid(it.project_id).value||0).toLocaleString() }}</span>
         </div>
       </div>
-      <div v-if="showRunDialog" class="form-overlay" @click.self="showRunDialog=false">
+        <div v-if="showRunDialog" class="form-overlay" @click.self="showRunDialog=false">
         <div class="form-card" style="max-width:380px">
           <div class="form-title">运行模拟</div>
           <label>日期范围</label>
@@ -859,6 +859,29 @@
             <div class="date-picker-field date-picker-sm" @click="openDatePicker(runForm.end_date, v => runForm.end_date = v, $event)" style="flex:1">
               {{ runForm.end_date || '结束日' }}
               <span class="date-arrow">📅</span>
+            </div>
+          </div>
+          <div v-if="editItemsForm.project_ids.length" style="margin-top:12px">
+            <div class="scope-toggle" @click="runProjectsExpanded=!runProjectsExpanded">
+              <span>已选 {{ editItemsForm.project_ids.length }} 个项目</span>
+              <span class="scope-toggle-arrow" :class="{open:runProjectsExpanded}">▶</span>
+            </div>
+            <div v-if="runProjectsExpanded" class="scope-proj-wrap">
+              <div v-for="pid in editItemsForm.project_ids" :key="pid" class="scope-proj-row">
+                <span>{{ getProjectName(pid) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="rgItems.length" style="margin-top:12px">
+            <div class="scope-toggle" @click="runProjectsExpanded=!runProjectsExpanded">
+              <span>将运行 {{ rgItems.length }} 个项目</span>
+              <span class="scope-toggle-arrow" :class="{open:runProjectsExpanded}">▶</span>
+            </div>
+            <div v-if="runProjectsExpanded" class="scope-proj-wrap">
+              <div v-for="it in rgItems" :key="it.project_id" class="scope-proj-row">
+                <span>{{ it.project_name }}</span>
+                <span class="scope-rule-tag" v-if="it.rule_name">{{ it.rule_name }}</span>
+              </div>
             </div>
           </div>
           <div class="form-btns">
@@ -1045,6 +1068,12 @@ function $notify(msg, isError = false) {
   toast._timer = setTimeout(() => { toast.show = false }, 3000)
 }
 const todayStr = new Date().toISOString().slice(0, 10)
+
+function doLogout() {
+  fetch('/number-warehouse/auth/logout', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => { if (d.ok) location.href = '/number-warehouse/' })
+}
 
 const view = ref('collection')
 
@@ -1882,7 +1911,17 @@ const rgForm = ref({ name: '', project_ids: [] })
 
 const showRunDialog = ref(false)
 const runRunning = ref(false)
+const runProjectsExpanded = ref(false)
 const runForm = ref({ start_date: '2020-03-18', end_date: todayStr })
+
+// Helper: get project name by ID (for editItemsForm project_ids)
+function getProjectName(pid) {
+  const it = rgItems.value.find(i => i.project_id === pid)
+  if (it) return it.project_name
+  // fallback: check all projects cache
+  const p = allProjects.value.find(p => p.id === pid)
+  return p ? p.name : `项目#${pid}`
+}
 
 const grid49 = ref(null)
 const gridDate = ref('')
@@ -2281,6 +2320,7 @@ async function execRunGroup() {
 
 function openRunDialog() {
   runForm.value = { start_date: '2020-03-18', end_date: todayStr }
+  runProjectsExpanded.value = false
   showRunDialog.value = true
 }
 
@@ -2589,7 +2629,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   display: flex; justify-content: space-between; align-items: center;
 }
 .tb-title { font-size: 17px; font-weight: 700; }
-.tb-date { font-size: 12px; color: #8899bb; }
+.tb-date { font-size: 12px; color: #8899bb; display: flex; align-items: center; gap: 6px; }
+.tb-logout { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: #8899bb; cursor: pointer; transition: all .15s; }
+.tb-logout:hover { border-color: #ff6b6b; color: #ff6b6b; }
 
 .view-tabs {
   display: flex; background: #fff; border-bottom: 1px solid #e8ecf1;
