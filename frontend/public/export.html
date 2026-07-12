@@ -320,14 +320,17 @@ function buildRecordList(projects, grids, summaryName) {
     const rankBadge = rank !== null
       ? '<span class="rec-rank-badge'+(isDanger?' danger':'')+'">排位 '+rank+'</span>'
       : '<span class="rec-rank-badge" style="background:#999">排位 --</span>';
-    const valStr = '<span class="rec-val">值 ¥'+val.toLocaleString()+'</span>';
+    const valColor = val >= 0 ? '#4caf50' : '#f44336';
+    const valStr = '<span class="rec-val" style="color:'+valColor+'">值 ¥'+val.toLocaleString()+'</span>';
     const projHtml = d.projects.map(p => {
       const pg = d.grids.filter(g => g.project_id === p.project_id);
       const maxCum = pg.length ? Math.max(...pg.map(g=>g.cumulative_sum||0)) : 0;
+      const pv = p.value || 0;
+      const pvColor = pv >= 0 ? '#4caf50' : '#f44336';
       return '<div class="grid-item">' +
         '<span class="proj-name">'+p.project_name+'</span>' +
         '<span class="grid-nums">累计 ¥'+maxCum.toLocaleString()+'</span>' +
-        '<span class="grid-cn">值 ¥'+(p.value||0).toLocaleString()+'</span>' +
+        '<span class="grid-cn" style="color:'+pvColor+'">值 ¥'+pv.toLocaleString()+'</span>' +
       '</div>';
     }).join('');
     return '<div class="rec-item" onclick="event.stopPropagation();toggleRecItem(this)">' +
