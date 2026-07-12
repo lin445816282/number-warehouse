@@ -269,6 +269,23 @@ def init_db():
     count_values = [0,0,0,25,30,35,40,45,50,55,60,64,72,81,91,102,113,126,140,156,173,191,211,233,257,283,312,343,377,415,456,501,549,603,661,725,795,871,955,1046,1145,1254,1373,1503,1645,1801,1971,2207,2473,2769,3101,3473]
     for i, v in enumerate(count_values):
         db.execute("INSERT OR IGNORE INTO count_value_map (count_n, value) VALUES (?,?)", (i+1, v))
+    # 复制25/24 阈值号码表
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS collection_threshold_numbers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            collection_id INTEGER NOT NULL,
+            threshold INTEGER NOT NULL,
+            summary_name TEXT NOT NULL DEFAULT '',
+            numbers_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(date, collection_id, threshold, summary_name)
+        )
+    """)
+    # 兼容旧表：补充 summary_name 列
+    try:
+        db.execute("ALTER TABLE collection_threshold_numbers ADD COLUMN summary_name TEXT NOT NULL DEFAULT ''")
+    except Exception: pass
     db.commit()
     db.close()
 
@@ -1588,9 +1605,13 @@ def run_simulation_endpoint(body: SimRunRequest):
             except HTTPException as e:
                 errors.append({"project_id": pid, "rule_id": rid, "error": e.detail})
             except Exception as e:
-                errors.append({"project_id": pid, "rule_id": rid, "error": str(e)})
+                import traceback
+                errors.append({"project_id": pid, "rule_id": rid, "error": str(e), "traceback": traceback.format_exc()[-500:]})
         if not all_skipped:
-            refresh_analysis(db)
+            try:
+                refresh_analysis(db)
+            except Exception as re:
+                errors.append({"phase": "refresh_analysis", "error": f"分析刷新失败: {str(re)}"})
         # 返回最后一条的run_id给前端默认展示
         last = results[-1] if results else None
         return {"ok": True, "runs": results, "errors": errors, "last_run_id": last["run_id"] if last else None}
@@ -3263,10 +3284,16 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
         use_date = rec["dt"] or dt.today().isoformat()
 
-    # 防未来日期污染
-    if use_date and use_date > dt.today().isoformat():
+    # 防未来日期污染 — 允许到最新抽签+1天
+    from datetime import timedelta as td
+    rec_draw = db.execute(
+        "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
+    ).fetchone()
+    max_draw = rec_draw["dt"] if rec_draw and rec_draw["dt"] else dt.today().isoformat()
+    max_allowed = (dt.fromisoformat(max_draw) + td(days=1)).isoformat()
+    if use_date and use_date > max(max_allowed, dt.today().isoformat()):
         db.close()
-        return {"ok": False, "error": f"日期 {use_date} 超过今天，拒绝采集"}
+        return {"ok": False, "error": f"日期 {use_date} 超过允许范围（最新抽签+1={max_allowed}），拒绝采集"}
 
     # ── 集合14/16：从集合19的 daily_snapshots 拉取当日值 ──
     if collection_id in (14, 16):
@@ -3708,6 +3735,14 @@ def export_record_ranks(collection_id: int, date: str = None):
     for sr in sim_rows:
         run_id_results.setdefault(sr["run_id"], []).append((sr["numbers_json"], sr["count_n"]))
 
+    # 4.5. 批量取 analysis_daily.result 作为当日结果值（正=命中，负=未中）
+    pid_qmarks2 = ",".join("?" * len(pid_list))
+    ad_rows = db.execute(
+        f"SELECT project_id, result FROM analysis_daily WHERE project_id IN ({pid_qmarks2}) AND date=?",
+        pid_list + [use_date]
+    ).fetchall()
+    pid_result = {r["project_id"]: r["result"] for r in ad_rows}
+
     # 5. 按 run_group 聚合计算排位
     result = {}
     for s in summaries:
@@ -3721,10 +3756,12 @@ def export_record_ranks(collection_id: int, date: str = None):
                 continue
 
             grid = {n: 0 for n in range(1, 50)}
+            rg_val = 0  # 当日结果值=该项目组所有项目的result之和
             for pid in pids:
                 run_id = pid_to_run_id.get(pid)
                 if not run_id:
                     continue
+                rg_val += pid_result.get(pid, 0)
                 for numbers_json, count_n in run_id_results.get(run_id, []):
                     nums = json.loads(numbers_json)
                     val = cv_map.get(count_n, 0)
@@ -3741,8 +3778,7 @@ def export_record_ranks(collection_id: int, date: str = None):
                 except ValueError:
                     pass
 
-            total_val = sum(grid.values())
-            rg_list.append({"run_group": r["rg_name"], "value": round(total_val, 2), "rank": rank})
+            rg_list.append({"run_group": r["rg_name"], "value": round(rg_val, 2), "rank": rank})
 
         if rg_list:
             result[sname] = rg_list
@@ -4072,11 +4108,225 @@ init_db()
 init_auth_db()
 
 # 静态文件
+# ==================== 集合 阈值号码 复制25/24 ====================
+
+@app.post("/api/threshold/compute")
+def compute_threshold_numbers(date: str = None):
+    """计算 汇总级复制25/24（每个汇总独立）+ 集合级（14=前4聚合, 16=前6聚合）
+    自动推进到最新抽签+1天；缺失快照时自动生成。
+    """
+    db = get_db()
+    from datetime import date as dt, timedelta
+
+    # 确定目标日期：最新抽签日 + 1天
+    rec = db.execute(
+        "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
+    ).fetchone()
+    max_draw = rec["dt"] if rec and rec["dt"] else None
+
+    if date:
+        use_date = date
+    elif max_draw:
+        use_date = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat()
+    else:
+        use_date = dt.today().isoformat()
+
+    # 安全检查：只允许到 max_draw+1，且不超过今天+1
+    max_allowed = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat() if max_draw else dt.today().isoformat()
+    if use_date > max(max_allowed, dt.today().isoformat()):
+        db.close()
+        return {"ok": False, "error": f"日期 {use_date} 超过允许范围（最新抽签{max_draw}+1={max_allowed}）"}
+
+    # 检查并自动生成 col19 快照
+    col19_cnt = db.execute(
+        "SELECT COUNT(*) FROM daily_snapshots WHERE date=? AND collection_id=19", (use_date,)
+    ).fetchone()[0]
+    if col19_cnt == 0:
+        db.close()
+        # 先采集 col19
+        r19 = save_daily_snapshot(19, use_date)
+        if not r19.get("ok"):
+            return {"ok": False, "error": f"col19 快照生成失败: {r19.get('error', r19.get('message', '未知'))}"}
+        # 重新打开数据库
+        db = get_db()
+        # 继续采集 14 和 16
+        db.close()
+        save_daily_snapshot(14, use_date)
+        save_daily_snapshot(16, use_date)
+        db = get_db()
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+
+    # 取 col19 前6个汇总
+    src_rows = db.execute(
+        "SELECT summary_id, summary_name FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id LIMIT 6",
+        (use_date,)
+    ).fetchall()
+    if not src_rows:
+        db.close()
+        return {"ok": False, "error": "col19 无快照数据"}
+
+    src_list = [(r["summary_id"], r["summary_name"]) for r in src_rows]
+
+    def build_grid(sids, db, use_date, cv_map):
+        """汇总 sid 列表的 sim_results 聚合为1-49格"""
+        pids = [r[0] for r in db.execute(
+            f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+            f"JOIN run_groups rg ON rgi.run_group_id = rg.id "
+            f"WHERE rg.summary_id IN ({','.join('?'*len(sids))})", sids
+        ).fetchall()]
+        if not pids:
+            return None
+        pids_str = ",".join("?" * len(pids))
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr "
+            f"JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({pids_str}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [use_date]
+        ).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        sorted_pos = sorted(pos.items(), key=lambda x: x[1], reverse=True)
+        all_nums = [num for num, _ in sorted_pos]
+        return all_nums[:25], all_nums[25:]
+
+    results = []
+
+    # --- 汇总级：每个汇总独立（cid = -summary_id）---
+    sids_all = [sid for sid, _ in src_list]
+    for sid, sname in src_list:
+        top25, bottom24 = build_grid([sid], db, use_date, cv_map)
+        if top25 is None:
+            continue
+        for threshold, nums in [(25, top25), (24, bottom24)]:
+            db.execute(
+                "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,?,?,?)",
+                (use_date, -sid, threshold, json.dumps(nums)))
+            results.append({"collection_id": -sid, "threshold": threshold, "summary_name": sname, "count": len(nums)})
+
+    # --- 集合14：前4汇总聚合 ---
+    if len(sids_all) >= 4:
+        top25, bottom24 = build_grid(sids_all[:4], db, use_date, cv_map)
+        if top25:
+            for threshold, nums in [(25, top25), (24, bottom24)]:
+                db.execute(
+                    "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,14,?,?)",
+                    (use_date, threshold, json.dumps(nums)))
+                results.append({"collection_id": 14, "threshold": threshold, "summary_name": "", "count": len(nums)})
+
+    # --- 集合16：前6汇总聚合 ---
+    if len(sids_all) >= 6:
+        top25, bottom24 = build_grid(sids_all[:6], db, use_date, cv_map)
+        if top25:
+            for threshold, nums in [(25, top25), (24, bottom24)]:
+                db.execute(
+                    "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,16,?,?)",
+                    (use_date, threshold, json.dumps(nums)))
+                results.append({"collection_id": 16, "threshold": threshold, "summary_name": "", "count": len(nums)})
+
+    db.commit()
+    db.close()
+    return {"ok": True, "date": use_date, "results": results}
+
+
+@app.get("/api/threshold/results")
+def get_threshold_results(date: str = None):
+    """读取已计算的阈值号码。cid<0→汇总级(-sid), cid=14/16→集合级
+    无date时自动用最新抽签+1"""
+    db = get_db()
+    from datetime import date as dt, timedelta
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM collection_threshold_numbers").fetchone()
+        stored_max = rec["dt"] if rec else None
+        # 也读取最新抽签+1
+        draw_rec = db.execute(
+            "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
+        ).fetchone()
+        if draw_rec and draw_rec["dt"]:
+            draw_plus = (dt.fromisoformat(draw_rec["dt"]) + timedelta(days=1)).isoformat()
+            use_date = draw_plus if not stored_max or draw_plus > stored_max else stored_max
+        else:
+            use_date = stored_max or dt.today().isoformat()
+
+    rows = db.execute(
+        "SELECT collection_id, threshold, numbers_json FROM collection_threshold_numbers WHERE date=? ORDER BY collection_id, threshold",
+        (use_date,)
+    ).fetchall()
+
+    # 构建 summary_id→name 映射
+    sid_to_name = {}
+    for r in rows:
+        cid = r["collection_id"]
+        if cid < 0:
+            sid_to_name[-cid] = None  # 标记需要查
+    if sid_to_name:
+        sids = list(sid_to_name.keys())
+        ph = ",".join("?" * len(sids))
+        for sr in db.execute(f"SELECT id, name FROM summaries WHERE id IN ({ph})", sids).fetchall():
+            sid_to_name[sr["id"]] = sr["name"]
+
+    items = []
+    for r in rows:
+        cid = r["collection_id"]
+        if cid < 0:
+            sname = sid_to_name.get(-cid, f"汇总{-cid}")
+            label = sname
+            key = f"s{-cid}"
+        else:
+            sname = ""
+            label = f"集合{cid}"
+            key = f"c{cid}"
+        existing = next((it for it in items if it["key"] == key), None)
+        if not existing:
+            existing = {"collection_id": cid, "summary_name": sname, "label": label, "key": key, "thresholds": {}}
+            items.append(existing)
+        existing["thresholds"][r["threshold"]] = {
+            "numbers": json.loads(r["numbers_json"]),
+            "numbers_str": ".".join(str(n) for n in json.loads(r["numbers_json"]))
+        }
+
+    # 附加 col19 汇总明细（所有汇总名 + total_value）
+    col19_rows = db.execute(
+        "SELECT summary_name, summary_id, total_value, draw_number FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id",
+        (use_date,)
+    ).fetchall()
+    col19_summaries = [{
+        "name": s["summary_name"],
+        "total_value": s["total_value"],
+        "draw_number": s["draw_number"]
+    } for s in col19_rows]
+
+    db.close()
+    return {"date": use_date, "items": items, "col19_summaries": col19_summaries}
+
+
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
-# 认证中间件（在 no-cache 之后添加，会包裹它）
+# CF Tunnel 路径前缀中间件（剥离 /number-warehouse，必须在 Auth 之前）
+from starlette.types import ASGIApp, Scope, Receive, Send
+class StripPrefixMiddleware:
+    def __init__(self, app: ASGIApp, prefix: str):
+        self.app = app
+        self.prefix = prefix
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] in ("http", "websocket") and scope["path"].startswith(self.prefix):
+            scope["path"] = scope["path"][len(self.prefix):] or "/"
+        await self.app(scope, receive, send)
+
+# 认证中间件（在 StripPrefix 之前添加，使其在外层先剥离前缀）
 app.include_router(auth_router)
 app.add_middleware(AuthMiddleware)
+app.add_middleware(StripPrefixMiddleware, prefix="/number-warehouse")
 
 @app.middleware("http")
 async def add_no_cache_header(request: Request, call_next):

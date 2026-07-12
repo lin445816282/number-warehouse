@@ -14,6 +14,7 @@
       <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 记录</span>
       <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别</span>
       <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 规则</span>
+      <span :class="{ active: view === 'threshold' }" @click="view = 'threshold'; loadThreshold()">🎯 阈值</span>
       <span :class="{ active: view === 'export' }" @click="view = 'export'">🔄 同步</span>
     </div>
 
@@ -307,6 +308,49 @@
     <!-- 导出视图 -->
     <div v-if="view === 'export'" class="export-view">
       <iframe :src="exportSrc" class="export-iframe" @load="onExportLoad"></iframe>
+    </div>
+
+    <!-- 阈值视图 -->
+    <div v-if="view === 'threshold'" class="threshold-view">
+      <div class="sim-header">
+        <span class="sim-title">🎯 复制25/24</span>
+        <button class="btn-add" @click="computeThreshold" :disabled="thComputing">
+          <span v-if="thComputing" class="btn-spin"></span>
+          {{ thComputing ? '计算中' : '计算' }}
+        </button>
+      </div>
+      <!-- 日期选择 -->
+      <div class="th-date-row">
+        <input type="date" v-model="thDate" @change="loadThreshold" class="th-date-input" />
+        <span v-if="thCol19?.length" class="th-draw">🎲 {{ thCol19[0].draw_number || '—' }}</span>
+      </div>
+      <div v-if="thMsg" class="th-msg" :class="thMsgType">{{ thMsg }}</div>
+      <!-- col19 汇总明细 -->
+      <div v-if="thCol19?.length" class="th-col19-block">
+        <div class="th-col19-title">📊 集合19 汇总</div>
+        <div class="th-col19-grid">
+          <div v-for="s in thCol19" :key="s.name" class="th-col19-item">
+            <span class="th-col19-name">{{ s.name }}</span>
+            <span class="th-col19-val">{{ fmtW(s.total_value) }}</span>
+          </div>
+        </div>
+      </div>
+      <!-- 阈值结果 -->
+      <div v-if="thItems.length === 0 && !thComputing" class="gs-empty">暂无数据，点击「计算」</div>
+      <template v-for="grp in thGrouped" :key="grp.key">
+        <div class="th-block" :class="grp.collection_id < 0 ? 'th-summary' : 'th-collection'">
+          <div class="th-block-title">{{ grp.label }}<span v-if="grp.col19_val != null" class="th-summary-val"> {{ fmtW(grp.col19_val) }}</span></div>
+          <div v-for="th in [25,24]" :key="th" style="margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+              <div class="th-label" style="margin-bottom:0">复制{{ th }}：</div>
+              <button class="th-copy-btn" @click="copyThNumbers(grp, th)" title="复制号码列表">📋</button>
+            </div>
+            <div class="th-nums">
+              <span v-for="n in 49" :key="n" class="th-num" :class="grp.thresholds[th]?.numbers?.includes(n) ? 'hit' : 'miss'">{{ n }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
     </div>
 
     <!-- 演算视图 -->
@@ -1085,6 +1129,75 @@ watch(view, (v) => {
     exportSrc.value = 'export.html'
   }
 })
+
+// ===== 阈值（复制25/24） =====
+const thItems = ref([])
+const thComputing = ref(false)
+const thMsg = ref('')
+const thMsgType = ref('')
+const thDate = ref('')  // 由后端自动确定（最新抽签+1）
+const thCol19 = ref([])
+
+function fmtW(v) { return v != null ? (v / 10000).toFixed(1) + '万' : '—' }
+
+const thGrouped = computed(() => {
+  const valMap = {}
+  thCol19.value.forEach(s => { valMap[s.name] = s.total_value })
+  return [...thItems.value]
+    .map(it => ({
+      ...it,
+      col19_val: it.collection_id < 0 ? valMap[it.summary_name] : null,
+      _sort: it.collection_id < 0 ? -it.collection_id : it.collection_id + 1000
+    }))
+    .sort((a, b) => a._sort - b._sort)
+})
+
+async function loadThreshold() {
+  try {
+    const q = thDate.value ? '?date=' + thDate.value : ''
+    const r = await fetch('api/threshold/results' + q, { credentials: 'include' })
+    if (!r.ok) throw new Error('加载失败')
+    const d = await r.json()
+    thItems.value = d.items || []
+    thCol19.value = d.col19_summaries || []
+    thDate.value = d.date || thDate.value
+  } catch(e) {
+    thItems.value = []
+    thCol19.value = []
+  }
+}
+
+async function computeThreshold() {
+  thComputing.value = true
+  thMsg.value = '计算中...'
+  thMsgType.value = ''
+  try {
+    const q = thDate.value ? '?date=' + thDate.value : ''
+    const r = await fetch('api/threshold/compute' + q, { method: 'POST', credentials: 'include' })
+    const d = await r.json()
+    if (d.ok) {
+      thMsg.value = '✅ 计算完成'
+      thMsgType.value = 'ok'
+      thDate.value = d.date
+      await loadThreshold()
+    } else {
+      thMsg.value = '❌ ' + (d.error || '计算失败')
+      thMsgType.value = 'err'
+    }
+  } catch(e) {
+    thMsg.value = '❌ ' + e.message
+    thMsgType.value = 'err'
+  }
+  thComputing.value = false
+  setTimeout(() => { thMsg.value = '' }, 3000)
+}
+
+function copyThNumbers(grp, th) {
+  const nums = grp.thresholds[th]?.numbers
+  if (!nums || nums.length === 0) return
+  navigator.clipboard.writeText(nums.join(','))
+    .then(() => $notify(`已复制${th}个号码`), () => $notify('复制失败', true))
+}
 
 // ===== 数据记录 =====
 const records = ref([])
@@ -2434,6 +2547,13 @@ async function execTodayRun() {
     }
     const adjusted = runs.filter(r => r.message && r.message.includes('调整'))
     if (adjusted.length) msg += ` · ⚠️ ${adjusted.length}项日期被自动调整`
+    // 错误详情摘要
+    if (errors.length) {
+      const errSummary = errors.slice(0, 3).map(e => 
+        e.phase ? `[${e.phase}] ${e.error}` : `[PID${e.project_id}] ${e.error?.slice(0,40)}`
+      ).join('；')
+      msg += `\n异常: ${errSummary}${errors.length > 3 ? ` ...等${errors.length}项` : ''}`
+    }
     $notify(msg)
     if (errors.length) console.warn('演算失败项:', errors)
     if (adjusted.length) console.warn('日期调整项:', adjusted.map(r => r.message))
@@ -3058,4 +3178,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   box-shadow: 0 0 0 2px rgba(238,10,36,.35), 0 4px 16px rgba(77,166,255,.25);
   transform: translateY(-1px);
 }
+
+/* ===== 阈值视图 ===== */
+.th-date-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 8px 12px 0; }
+.th-date-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #d0d5dd; background: #fff; font-size: 14px; color: #1a2a4a; }
+.th-draw { font-size: 15px; font-weight: 700; color: #e05a1e; white-space: nowrap; }
+.th-col19-block { background: #eef4ff; border-radius: 10px; padding: 10px 14px; margin: 8px 12px; }
+.th-col19-title { font-size: 13px; font-weight: 600; color: #4da6ff; margin-bottom: 8px; }
+.th-col19-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.th-col19-item { display: flex; flex-direction: column; align-items: center; background: #fff; border-radius: 8px; padding: 6px 12px; min-width: 72px; }
+.th-col19-name { font-size: 12px; color: #8899b0; }
+.th-col19-val { font-size: 14px; font-weight: 700; color: #1a2a4a; }
+.th-date-bar { padding: 8px 14px; font-size: 14px; color: #4da6ff; text-align: center; background: #f0f6ff; border-radius: 8px; margin: 8px 12px 0; }
+.th-msg { padding: 8px 14px; border-radius: 8px; font-size: 13px; text-align: center; margin: 8px 12px 0; }
+.th-msg.ok { background: #0d3320; color: #5ce6a0; }
+.th-msg.err { background: #3d1515; color: #e66060; }
+.th-block { background: #f5f7fa; border-radius: 12px; padding: 14px; margin: 6px 12px; }
+.th-block.th-collection { border-left: 3px solid #4da6ff; }
+.th-block-title { font-size: 15px; font-weight: 700; color: #1a2a4a; margin-bottom: 4px; }
+.th-summary-val { font-size: 12px; color: #8899b0; font-weight: 400; }
+.th-label { font-size: 13px; color: #8899b0; }
+.th-copy-btn { background: none; border: 1px solid #ccd5e0; border-radius: 6px; padding: 1px 6px; cursor: pointer; font-size: 12px; opacity: 0.6; transition: opacity .2s; }
+.th-copy-btn:hover { opacity: 1; }
+.th-copy-btn:active { background: #e8ecf1; }
+.th-nums { display: flex; flex-wrap: wrap; gap: 5px; }
+.th-num { width: 32px; height: 32px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+.th-num.hit { background: #4da6ff; color: #fff; }
+.th-num.miss { background: #e8ecf1; color: #8899b0; }
 </style>
