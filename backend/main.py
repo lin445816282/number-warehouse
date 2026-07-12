@@ -207,6 +207,10 @@ def init_db():
             group_name TEXT NOT NULL,
             updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     """)
     # 初始化配置
     for k, v in [("mapping", json.dumps(DEFAULT_MAPPING, ensure_ascii=False)),
@@ -3259,6 +3263,11 @@ def save_daily_snapshot(collection_id: int, date: str = None):
         rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
         use_date = rec["dt"] or dt.today().isoformat()
 
+    # 防未来日期污染
+    if use_date and use_date > dt.today().isoformat():
+        db.close()
+        return {"ok": False, "error": f"日期 {use_date} 超过今天，拒绝采集"}
+
     # ── 集合14/16：从集合19的 daily_snapshots 拉取当日值 ──
     if collection_id in (14, 16):
         max_n = 4 if collection_id == 14 else 6
@@ -3495,7 +3504,7 @@ def export_daily_detail(collection_id: int, date: str = None):
     ).fetchall()
 
     if rows:
-        # 从排位快照表补充 grid_count
+        # 补充 grid_count 和 run_group_name
         grid_counts = {}
         grid_rows = db.execute(
             "SELECT summary_name, project_id, COUNT(*) as cnt "
@@ -3505,6 +3514,20 @@ def export_daily_detail(collection_id: int, date: str = None):
         ).fetchall()
         for gr in grid_rows:
             grid_counts[(gr["summary_name"], gr["project_id"])] = gr["cnt"]
+
+        # 获取项目的 run_group_name
+        pids = list(set(r["project_id"] for r in rows))
+        rg_map = {}
+        if pids:
+            pids_str = ",".join("?" * len(pids))
+            rg_rows = db.execute(
+                f"SELECT rgi.project_id, rg.name FROM run_group_items rgi "
+                f"JOIN run_groups rg ON rgi.run_group_id = rg.id "
+                f"WHERE rgi.project_id IN ({pids_str})", pids
+            ).fetchall()
+            for rg in rg_rows:
+                rg_map[rg["project_id"]] = rg["name"]
+
         db.close()
         from collections import defaultdict
         summaries = defaultdict(list)
@@ -3514,12 +3537,27 @@ def export_daily_detail(collection_id: int, date: str = None):
                 "project_id": r["project_id"],
                 "project_name": r["project_name"],
                 "value": r["value"],
-                "grid_count": gc
+                "grid_count": gc,
+                "run_group": rg_map.get(r["project_id"], "")
             })
         return {"date": use_date, "summaries": dict(summaries), "source": "snapshot"}
 
     # 无快照 → 实时计算
     _, _, _, project_details, grid_details = _compute_snapshot(db, collection_id, use_date)
+
+    # 获取项目的 run_group_name
+    pids = list(set(pid for _, _, pid, _, _, _ in project_details))
+    rg_map = {}
+    if pids:
+        pids_str = ",".join("?" * len(pids))
+        rg_rows = db.execute(
+            f"SELECT rgi.project_id, rg.name FROM run_group_items rgi "
+            f"JOIN run_groups rg ON rgi.run_group_id = rg.id "
+            f"WHERE rgi.project_id IN ({pids_str})", pids
+        ).fetchall()
+        for rg in rg_rows:
+            rg_map[rg["project_id"]] = rg["name"]
+
     db.close()
 
     from collections import defaultdict
@@ -3529,7 +3567,8 @@ def export_daily_detail(collection_id: int, date: str = None):
             "project_id": pid,
             "project_name": pname_full,
             "value": val,
-            "grid_count": grid_cnt
+            "grid_count": grid_cnt,
+            "run_group": rg_map.get(pid, "")
         })
 
     return {"date": use_date, "summaries": dict(summaries), "source": "computed"}
@@ -3579,6 +3618,137 @@ def export_grid_detail(collection_id: int, date: str = None):
             "count_n": cn, "value": val, "value_x_47": v47, "cumulative_sum": cum
         })
     return {"date": use_date, "grids": dict(result), "source": "computed"}
+
+
+@app.get("/api/export/record-ranks")
+def export_record_ranks(collection_id: int, date: str = None):
+    """计算每条记录(记录N)的1-49排位。返回 {summaries: {summary_name: [{run_group, value, rank}, ...]}}"""
+    db = get_db()
+    from datetime import date as dt
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+
+    draw_rec = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+    draw_num = draw_rec["draw_number"] if draw_rec else None
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+
+    # 1. 批量取所有 summaries → run_groups → 映射
+    summaries = db.execute(
+        "SELECT id, name FROM summaries WHERE collection_id=? ORDER BY id", (collection_id,)
+    ).fetchall()
+    if not summaries:
+        db.close()
+        return {"date": use_date, "draw_number": draw_num, "summaries": {}}
+
+    summary_ids = tuple(s["id"] for s in summaries)
+    qmarks = ",".join("?" * len(summary_ids))
+    rg_rows = db.execute(
+        f"SELECT rg.id AS rg_id, rg.name AS rg_name, rg.summary_id FROM run_groups rg WHERE rg.summary_id IN ({qmarks}) ORDER BY rg.id",
+        summary_ids
+    ).fetchall()
+
+    if not rg_rows:
+        db.close()
+        return {"date": use_date, "draw_number": draw_num, "summaries": {}}
+
+    rg_map = {}  # rg_id → {summary_id, summary_name, rg_name}
+    all_rg_ids = []
+    for r in rg_rows:
+        rg_map[r["rg_id"]] = r
+        all_rg_ids.append(r["rg_id"])
+
+    # 2. 批量取所有 run_group_items → project_id
+    rg_qmarks = ",".join("?" * len(all_rg_ids))
+    rgi_rows = db.execute(
+        f"SELECT run_group_id, project_id FROM run_group_items WHERE run_group_id IN ({rg_qmarks})",
+        all_rg_ids
+    ).fetchall()
+
+    rg_pids = {}  # rg_id → [pid, ...]
+    all_pids = set()
+    for r in rgi_rows:
+        rg_pids.setdefault(r["run_group_id"], []).append(r["project_id"])
+        all_pids.add(r["project_id"])
+
+    if not all_pids:
+        db.close()
+        return {"date": use_date, "draw_number": draw_num, "summaries": {}}
+
+    # 3. 批量取最新 sim_run per project
+    pid_list = list(all_pids)
+    pid_qmarks = ",".join("?" * len(pid_list))
+    sr_rows = db.execute(
+        f"SELECT srn.id AS run_id, srn.project_id FROM sim_runs srn "
+        f"WHERE srn.project_id IN ({pid_qmarks}) "
+        f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+        pid_list
+    ).fetchall()
+
+    pid_to_run_id = {r["project_id"]: r["run_id"] for r in sr_rows}
+    all_run_ids = list(set(r["run_id"] for r in sr_rows))
+
+    if not all_run_ids:
+        db.close()
+        return {"date": use_date, "draw_number": draw_num, "summaries": {}}
+
+    # 4. 批量取所有 sim_results（一次查询！）
+    rid_qmarks = ",".join("?" * len(all_run_ids))
+    sim_rows = db.execute(
+        f"SELECT run_id, numbers_json, count_n FROM sim_results WHERE run_id IN ({rid_qmarks}) AND date=?",
+        all_run_ids + [use_date]
+    ).fetchall()
+
+    # run_id → [(numbers_json, count_n), ...]
+    run_id_results = {}
+    for sr in sim_rows:
+        run_id_results.setdefault(sr["run_id"], []).append((sr["numbers_json"], sr["count_n"]))
+
+    # 5. 按 run_group 聚合计算排位
+    result = {}
+    for s in summaries:
+        sname = s["name"]
+        rg_list = []
+        for r in rg_rows:
+            if r["summary_id"] != s["id"]:
+                continue
+            pids = rg_pids.get(r["rg_id"], [])
+            if not pids:
+                continue
+
+            grid = {n: 0 for n in range(1, 50)}
+            for pid in pids:
+                run_id = pid_to_run_id.get(pid)
+                if not run_id:
+                    continue
+                for numbers_json, count_n in run_id_results.get(run_id, []):
+                    nums = json.loads(numbers_json)
+                    val = cv_map.get(count_n, 0)
+                    for n in nums:
+                        if 1 <= n <= 49:
+                            grid[n] += val
+
+            draw_val = grid.get(draw_num, 0) if draw_num else 0
+            rank = None
+            if draw_num and draw_val > 0:
+                sorted_vals = sorted(grid.values(), reverse=True)
+                try:
+                    rank = sorted_vals.index(draw_val) + 1
+                except ValueError:
+                    pass
+
+            total_val = sum(grid.values())
+            rg_list.append({"run_group": r["rg_name"], "value": round(total_val, 2), "rank": rank})
+
+        if rg_list:
+            result[sname] = rg_list
+
+    db.close()
+    return {"date": use_date, "draw_number": draw_num, "summaries": result}
 
 
 @app.get("/api/export/collection-info")
@@ -3667,6 +3837,28 @@ def _save_sync_cron(cfg):
     with open(SYNC_CRON_FILE, "w") as f:
         json.dump(cfg, f)
 
+
+@app.get("/api/export/settings")
+def get_export_settings():
+    """读取导出设置（预警阈值等）"""
+    db = get_db()
+    rows = db.execute("SELECT key, value FROM app_settings").fetchall()
+    db.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+@app.put("/api/export/settings")
+async def update_export_settings(request: Request):
+    """更新导出设置。支持 {alert_threshold: 45, ...}"""
+    body = await request.json()
+    db = get_db()
+    for k, v in body.items():
+        db.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)", (k, str(v)))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
 @app.get("/api/export/sync-cron")
 def get_sync_cron():
     return _load_sync_cron()
@@ -3742,13 +3934,22 @@ def sync_to_store(collection_id: int, date: str = None):
         store = DIR_STORE[collection_id]
         total = meta["result"]
         rank = meta["rank"]
+        # 获取构成集合的B级汇总名
+        max_n = 4 if collection_id == 14 else 6
+        db3 = get_db()
+        src_sums = db3.execute(
+            "SELECT summary_name, total_value FROM daily_snapshots WHERE collection_id=19 AND date=? ORDER BY summary_id LIMIT ?",
+            (use_date, max_n)
+        ).fetchall()
+        db3.close()
+        contrib_names = ", ".join([r["summary_name"] for r in (src_sums or [])]) if src_sums else ""
         records.append({
             "id": f"{use_date}-col{collection_id}-income",
             "store": store,
             "date": use_date,
             "category": "income",
             "amount": total,
-            "note": f"集合{collection_id} 排位{rank}"
+            "note": f"集合{collection_id} 排位{rank} ← {contrib_names}"
         })
         records.append({
             "id": f"{use_date}-col{collection_id}-cat",
@@ -3756,22 +3957,41 @@ def sync_to_store(collection_id: int, date: str = None):
             "date": use_date,
             "category": "cat_1783487972049",
             "amount": rank or 0,
-            "note": f"集合{collection_id} 排位{rank} ¥{total:,.0f}"
+            "note": f"集合{collection_id} 排位{rank} ← {contrib_names}"
         })
     else:
+        # 查询 grid 数据获取记录范围
+        db2 = get_db()
+        grid_rows = db2.execute(
+            "SELECT summary_name, count_n FROM daily_grid_snapshots WHERE date=? AND collection_id=?",
+            (use_date, collection_id)
+        ).fetchall()
+        db2.close()
+        rec_range_map = {}
+        for gr in (grid_rows or []):
+            sn = gr["summary_name"]
+            cn = gr["count_n"]
+            if sn not in rec_range_map:
+                rec_range_map[sn] = set()
+            rec_range_map[sn].add(cn)
         for s in (summaries_data or []):
             store = STORE_MAP.get(s.get("name", ""))
             if not store:
                 continue
             amount = s.get("total_value") or 0
             rank = s.get("draw_value_rank") or 0
+            # 记录范围
+            rec_nums = sorted(rec_range_map.get(s.get("name",""), set()))
+            rec_label = ""
+            if rec_nums:
+                rec_label = f"记录{rec_nums[0]}" if len(rec_nums)==1 else f"记录{rec_nums[0]}~{rec_nums[-1]}"
             records.append({
                 "id": f"{use_date}-{s['name']}-income",
                 "store": store,
                 "date": use_date,
                 "category": "income",
                 "amount": amount,
-                "note": f"排位 {rank}"
+                "note": f"{rec_label} · 排位{rank}"
             })
             records.append({
                 "id": f"{use_date}-{s['name']}-cat",
@@ -3779,7 +3999,7 @@ def sync_to_store(collection_id: int, date: str = None):
                 "date": use_date,
                 "category": "cat_1783487972049",
                 "amount": rank,
-                "note": f"排位 {rank}  ·  ¥{amount:,.0f}"
+                "note": f"{rec_label} · 排位{rank} · ¥{amount:,.0f}"
             })
 
     if not records:
