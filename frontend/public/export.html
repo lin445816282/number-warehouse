@@ -7,7 +7,7 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#f0f2f5; color:#333; padding:12px 12px 40px; font-size:14px; }
-.header { text-align:center; margin:8px 0 16px; }
+.header { text-align:center; margin:8px 0 16px; position:relative; }
 .header .title { font-size:20px; font-weight:700; }
 .date-bar { display:flex; gap:8px; margin:12px 0; align-items:center; }
 .date-bar input { flex:1; padding:8px 12px; border:1px solid #d0d5dd; border-radius:8px; font-size:15px; background:#fff; }
@@ -47,33 +47,83 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .draw-rank { display:inline-block; background:#e65100; color:#fff; font-size:10px; font-weight:700; padding:1px 6px; border-radius:8px; margin-left:6px; vertical-align:middle; }
 .proj-list { display:none; margin-top:10px; padding-top:10px; border-top:1px solid #eee; }
 .proj-list.show { display:block; }
-.proj-item { display:flex; justify-content:space-between; align-items:center; padding:8px 4px; border-bottom:1px solid #f5f5f5; cursor:pointer; flex-wrap:wrap; }
-.proj-item:last-child { border-bottom:none; }
-.proj-name { font-size:13px; color:#555; }
-.proj-val { font-size:13px; font-weight:600; color:#1565c0; }
-.proj-grids { color:#999; font-size:11px; margin-left:4px; }
-.grid-list { display:none; width:100%; margin-left:16px; padding:4px 0 4px 8px; border-left:2px solid #e3f2fd; }
-.grid-list.show { display:block; }
-.grid-item { display:flex; justify-content:space-between; padding:4px 0; font-size:12px; }
-.grid-cn { color:#e65100; font-weight:600; min-width:32px; }
-.grid-nums { color:#555; flex:1; margin:0 8px; word-break:break-all; }
-.grid-val { color:#1565c0; font-weight:600; white-space:nowrap; }
+    .proj-item { display:flex; justify-content:space-between; align-items:center; padding:8px 4px; border-bottom:1px solid #f5f5f5; cursor:pointer; flex-wrap:wrap; }
+    .proj-item:last-child { border-bottom:none; }
+    .proj-name { font-size:13px; color:#555; }
+    .proj-val { font-size:13px; font-weight:600; color:#1565c0; }
+    .proj-grids { color:#999; font-size:11px; margin-left:4px; }
+    .grid-list { display:none; width:100%; margin-left:16px; padding:4px 0 4px 8px; border-left:2px solid #e3f2fd; }
+    .grid-list.show { display:block; }
+    .grid-item { display:flex; justify-content:space-between; padding:4px 0; font-size:12px; }
+    .grid-cn { color:#e65100; font-weight:600; min-width:32px; }
+    .grid-nums { color:#555; flex:1; margin:0 8px; word-break:break-all; }
+    .grid-val { color:#1565c0; font-weight:600; white-space:nowrap; }
+    /* 记录行（二级展开） */
+    .rec-list { display:none; margin-top:10px; padding-top:10px; border-top:1px solid #eee; }
+    .rec-list.show { display:block; }
+    .rec-item { display:flex; justify-content:space-between; align-items:center; padding:8px 4px; border-bottom:1px solid #f0f0f0; cursor:pointer; flex-wrap:wrap; }
+    .rec-item:last-child { border-bottom:none; }
+    .rec-label { font-size:14px; font-weight:600; color:#e65100; min-width:60px; }
+    .rec-cum { font-size:13px; color:#333; flex:1; margin:0 8px; }
+    .rec-rank { font-size:11px; color:#888; }
+    .rec-projs { color:#999; font-size:11px; margin-left:4px; }
 .loading { text-align:center; padding:40px; color:#999; }
 .empty { text-align:center; padding:40px; color:#999; font-size:14px; }
 .expand-hint { font-size:11px; color:#ccc; text-align:center; margin-top:2px; }
-.meta-card { flex:1; border-radius:10px; padding:12px; text-align:center; color:#fff; }
-.meta-card .mc-label { font-size:11px; opacity:.85; }
-.meta-card .mc-result { font-size:22px; font-weight:700; margin:4px 0; }
-.meta-card .mc-rank { font-size:13px; opacity:.9; }
+    .meta-card { flex:1; border-radius:10px; padding:12px; text-align:center; color:#fff; cursor:pointer; position:relative; }
+    .meta-card .mc-label { font-size:11px; opacity:.85; }
+    .meta-card .mc-result { font-size:22px; font-weight:700; margin:4px 0; }
+    .meta-card .mc-rank { font-size:13px; opacity:.9; }
+    .meta-card .mc-arrow { font-size:10px; opacity:.6; position:absolute; bottom:6px; right:10px; }
+    .meta-expand { background:#fff; border-radius:8px; margin:4px 0 8px; padding:8px 12px; display:none; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+    .meta-expand.show { display:block; }
+    .meta-expand .me-title { font-size:12px; color:#888; margin-bottom:6px; }
+    .meta-expand .me-row { display:flex; justify-content:space-between; align-items:center; padding:4px 0; font-size:13px; border-bottom:1px solid #f0f0f0; }
+    .meta-expand .me-row:last-child { border-bottom:none; }
+    .meta-expand .me-name { color:#333; font-weight:500; }
+    .meta-expand .me-val { color:#1a73e8; font-weight:600; }
+    .meta-expand .me-rank { display:inline-block; background:#e65100; color:#fff; font-size:10px; font-weight:700; padding:1px 6px; border-radius:8px; margin-left:6px; }
+    .meta-expand .me-mini-card { border:1px solid #e8e8e8; border-radius:8px; margin:4px 0; padding:8px 10px; background:#fafafa; }
+    .meta-expand .me-mini-header { display:flex; justify-content:space-between; align-items:center; cursor:pointer; padding:2px 0; }
+    .meta-expand .me-mini-name { font-size:14px; font-weight:600; color:#333; }
+    .meta-expand .me-mini-arrow { font-size:10px; color:#999; transition:transform .2s; display:inline-block; width:12px; }
+    .meta-expand .me-mini-arrow.open { transform:rotate(90deg); }
+    .meta-expand .me-mini-meta { font-size:11px; color:#999; padding:2px 0 4px 18px; }
+    .meta-expand .me-mini-rec { display:none; border-top:1px solid #eee; margin-top:4px; padding-top:2px; }
+    .meta-expand .me-mini-rec.show { display:block; }
+/* 预警横幅 */
+.alert-banner { margin:4px 0 8px; padding:10px 14px; background:#fff3e0; border-left:4px solid #e65100; border-radius:6px; font-size:13px; color:#bf360c; cursor:pointer; line-height:1.6; }
+.alert-banner b { color:#e65100; }
+/* 铃铛按钮 */
+.bell-btn { width:40px; height:40px; border-radius:10px; border:1px solid #d0d5dd; background:#fff; font-size:20px; cursor:pointer; display:flex; align-items:center; justify-content:center; position:relative; flex-shrink:0; }
+.bell-btn.has-alert { border-color:#e65100; background:#fff3e0; animation:pulse .8s ease infinite alternate; }
+@keyframes pulse { from{transform:scale(1)} to{transform:scale(1.1)} }
+.bell-dot { position:absolute; top:4px; right:4px; width:8px; height:8px; background:#ee0a24; border-radius:50%; display:none; }
+.bell-dot.show { display:block; }
+.bell-badge { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; border-radius:9px; background:#ee0a24; color:#fff; font-size:10px; font-weight:700; display:none; align-items:center; justify-content:center; padding:0 4px; line-height:18px; }
+.bell-badge.show { display:flex; }
+/* 铃铛弹窗 */
+.bell-popup { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#fff; border-radius:12px; padding:20px; box-shadow:0 8px 30px rgba(0,0,0,.2); z-index:100; width:300px; max-width:90vw; }
+.bell-popup-header { font-size:17px; font-weight:700; color:#333; margin-bottom:16px; }
+.bell-popup-row { display:flex; align-items:center; justify-content:space-between; margin:10px 0; font-size:15px; }
+.bell-popup-hint { font-size:12px; color:#999; margin-top:6px; }
+/* 记录排位标签 */
+.rec-rank-badge { display:inline-block; background:#e65100; color:#fff; font-size:11px; font-weight:700; padding:1px 7px; border-radius:10px; margin:0 4px; }
+.rec-rank-badge.danger { background:#ee0a24; animation:pulse-badge .6s ease infinite alternate; }
+@keyframes pulse-badge { from{opacity:1} to{opacity:.5} }
+.rec-val { font-size:12px; color:#1a73e8; font-weight:600; white-space:nowrap; }
+.rec-info { display:flex; align-items:center; gap:6px; flex:1; margin:0 8px; }
 </style>
 </head>
 <body>
 
 <div class="header">
   <div class="title" style="text-align:center;margin-bottom:12px">📊 每日汇总</div>
+  <button class="bell-btn" id="bellBtn" onclick="toggleBellSettings()" title="预警设置" style="position:absolute;top:0;right:0">🔔<span class="bell-badge" id="bellBadge"></span></button>
 </div>
 <div class="date-info" id="dateInfo">--</div>
 <div class="day-seq" id="daySeq"></div>
+<div class="alert-banner" id="alertBanner" style="display:none" onclick="scrollToFirstAlert()"></div>
 
 <div class="date-bar">
   <input type="date" id="dateInput">
@@ -104,6 +154,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   </div>
 </div>
 
+<div class="bell-popup" id="bellPopup" style="display:none">
+  <div class="bell-popup-header">🔔 预警设置</div>
+  <div class="bell-popup-row">
+    <span>排位阈值</span>
+    <input type="number" id="alertThreshold" min="1" max="49" value="45" style="width:60px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:6px;text-align:center;font-size:16px">
+  </div>
+  <div class="bell-popup-hint">当某个B级汇总下 ≥3 条记录的排位超过此阈值时报警</div>
+  <div style="display:flex;gap:8px;margin-top:12px">
+    <button class="cron-save" onclick="saveBellSettings()" style="flex:1">保存</button>
+    <button class="cron-cancel" onclick="toggleBellSettings()" style="flex:1">取消</button>
+  </div>
+</div>
+
 <div id="cardList"></div>
 
 <div style="margin-top:16px;display:flex;gap:10px" id="metaCards"></div>
@@ -113,6 +176,8 @@ const API = 'api/export';
 const CID = 19;  // 固定A级集合
 let _summariesData = [];
 let _collName = '';
+let _recordRanks = {};  // {summary_name: [{run_group, value, rank}, ...]}
+let _alertThreshold = 45;  // 默认值，initSettings() 后从服务端加载
 
 // 加载集合信息 → 动态构建筛选芯片
 async function initCollection() {
@@ -165,18 +230,22 @@ async function loadData() {
   
   try {
     // 主集合 19
-    const [sumResp, detailResp, gridResp] = await Promise.all([
+    const [sumResp, detailResp, gridResp, rankResp] = await Promise.all([
       fetch(API + '/daily-summary?collection_id=' + CID + '&date=' + date),
       fetch(API + '/daily-detail?collection_id=' + CID + '&date=' + date),
-      fetch(API + '/grid-detail?collection_id=' + CID + '&date=' + date)
+      fetch(API + '/grid-detail?collection_id=' + CID + '&date=' + date),
+      fetch(API + '/record-ranks?collection_id=' + CID + '&date=' + date)
     ]);
     const sumData = await sumResp.json();
     const detailData = await detailResp.json();
     const gridData = await gridResp.json();
-    
+    const rankData = await rankResp.json();
+    _recordRanks = rankData.summaries || {};
+
     document.getElementById('dateInfo').textContent = sumData.date + '  ·  抽签数' + (sumData.draw_number || '-');
     document.getElementById('daySeq').textContent = sumData.day_seq ? '日期序号 ' + sumData.day_seq : '';
     _summariesData = sumData.summaries || [];
+    _metaExpandCache = {};  // 切日期清缓存
     onFilterChange();
     loadMetaCards(date);
     
@@ -184,6 +253,7 @@ async function loadData() {
       document.getElementById('cardList').innerHTML = '<div class="empty">暂无数据，请先采集</div>';
     } else {
       document.getElementById('cardList').innerHTML = renderCards(sumData.summaries, detailData.summaries || {}, gridData.grids || {});
+      checkAlerts();
     }
     
   } catch(e) {
@@ -195,37 +265,101 @@ function renderCards(summaries, projMap, gridMap) {
   let html = '';
   summaries.forEach(s => {
     const projects = projMap[s.name] || [];
+    const snGrids = gridMap[s.name] || [];
     const dr = s.draw_value_rank;
     const rankHtml = dr ? ' <span class="draw-rank">排位 '+dr+'</span>' : '';
-    html += '<div class="card" onclick="toggleProj(this)"><div class="card-header"><div><div class="name">'+s.name+rankHtml+' <span class="card-arrow">▶</span></div><div class="meta">'+projects.length+' 项目 · 命中率 '+s.hit_rate+'%</div></div><div><div class="val">¥'+(s.total_value || 0).toLocaleString()+'</div><div class="rate">'+s.hit_rate+'%</div></div></div><div class="proj-list">'+buildProjList(s.name, projects, gridMap)+'</div></div>';
+    // 统计 run_group 数
+    const rgSet = new Set(projects.map(p => p.run_group).filter(Boolean));
+    const rgCount = rgSet.size;
+    html += '<div class="card" onclick="toggleRec(this)"><div class="card-header"><div><div class="name">'+s.name+rankHtml+' <span class="card-arrow">▶</span></div><div class="meta">'+rgCount+' 记录 · '+projects.length+' 项目 · 命中率 '+s.hit_rate+'%</div></div><div><div class="val">¥'+(s.total_value || 0).toLocaleString()+'</div><div class="rate">'+s.hit_rate+'%</div></div></div><div class="rec-list">'+buildRecordList(projects, snGrids, s.name)+'</div></div>';
   });
-  return html + '<div class="expand-hint">👆 点击卡片展开项目 & 排位明细</div>';
+  return html + '<div class="expand-hint">👆 点击卡片展开记录 → 再点记录展开项目</div>';
 }
 
-function buildProjList(sn, projects, gridMap) {
-  const snGrids = gridMap[sn] || [];
-  const gridByPid = {};
-  snGrids.forEach(g => {
-    if (!gridByPid[g.project_id]) gridByPid[g.project_id] = [];
-    gridByPid[g.project_id].push(g);
+function buildRecordList(projects, grids, summaryName) {
+  // project_id → run_group 映射
+  const projRG = {};
+  projects.forEach(p => { projRG[p.project_id] = p.run_group || ''; });
+  // grid 也补上 run_group
+  grids.forEach(g => { if(!g._rg) g._rg = projRG[g.project_id] || ''; });
+  
+  // 排位查找：summaryName → run_group → {value, rank}
+  const rankByRG = {};
+  (_recordRanks[summaryName] || []).forEach(r => { rankByRG[r.run_group] = r; });
+
+  // 按 run_group 分组
+  const rgMap = {};
+  projects.forEach(p => {
+    const rg = p.run_group || '';
+    if(!rg) return;
+    if(!rgMap[rg]) rgMap[rg] = {projects:[], grids:[]};
+    rgMap[rg].projects.push(p);
   });
-  return projects.map(p => {
-    const grids = gridByPid[p.project_id] || [];
-    const gridHtml = grids.map(g => '<div class="grid-item"><span class="grid-cn">'+g.count_n+'中</span><span class="grid-nums">v='+g.value+'</span><span class="grid-val">×47='+(g.value_x_47||0).toLocaleString()+'</span></div>').join('');
-    return '<div class="proj-item" onclick="event.stopPropagation();toggleGrid(this)"><div><span class="proj-name">'+p.project_name+'</span><span class="proj-grids">'+grids.length+'排位</span></div><span class="proj-val">¥'+(p.value || 0).toLocaleString()+'</span><div class="grid-list">'+gridHtml+'</div></div>';
+  grids.forEach(g => {
+    const rg = g._rg || '';
+    if(!rg) return;
+    if(!rgMap[rg]) rgMap[rg] = {projects:[], grids:[]};
+    rgMap[rg].grids.push(g);
+  });
+  
+  // 按 记录N 数字排序
+  const keys = Object.keys(rgMap).sort((a,b) => {
+    const na = parseInt(a.replace(/[^0-9]/g,'')) || 0;
+    const nb = parseInt(b.replace(/[^0-9]/g,'')) || 0;
+    return na - nb;
+  });
+  
+  return keys.map(rg => {
+    const d = rgMap[rg];
+    const totalCum = d.grids.reduce((s,g) => s + (g.cumulative_sum||0), 0);
+    const rk = rankByRG[rg];
+    const rank = rk ? rk.rank : null;
+    const val = rk ? rk.value : 0;
+    // 排位标签
+    const isDanger = rank !== null && rank > _alertThreshold;
+    const rankBadge = rank !== null
+      ? '<span class="rec-rank-badge'+(isDanger?' danger':'')+'">排位 '+rank+'</span>'
+      : '<span class="rec-rank-badge" style="background:#999">排位 --</span>';
+    const valStr = '<span class="rec-val">值 ¥'+val.toLocaleString()+'</span>';
+    const projHtml = d.projects.map(p => {
+      const pg = d.grids.filter(g => g.project_id === p.project_id);
+      const maxCum = pg.length ? Math.max(...pg.map(g=>g.cumulative_sum||0)) : 0;
+      return '<div class="grid-item">' +
+        '<span class="proj-name">'+p.project_name+'</span>' +
+        '<span class="grid-nums">累计 ¥'+maxCum.toLocaleString()+'</span>' +
+        '<span class="grid-cn">值 ¥'+(p.value||0).toLocaleString()+'</span>' +
+      '</div>';
+    }).join('');
+    return '<div class="rec-item" onclick="event.stopPropagation();toggleRecItem(this)">' +
+      '<span class="rec-label">'+rg+'</span>' +
+      '<div class="rec-info">'+valStr+rankBadge+'</div>' +
+      '<span class="rec-cum">累计 ¥'+totalCum.toLocaleString()+'</span>' +
+      '<div class="grid-list">'+projHtml+'</div>' +
+    '</div>';
   }).join('');
 }
 
-function toggleProj(card) {
-  const list = card.querySelector('.proj-list');
+function toggleMiniCard(header) {
+  const card = header.closest('.me-mini-card');
+  const list = card.querySelector('.me-mini-rec');
+  const arrow = header.querySelector('.me-mini-arrow');
+  list.classList.toggle('show');
+  arrow.classList.toggle('open');
+  arrow.textContent = list.classList.contains('show') ? '▼' : '▶';
+}
+
+function toggleRec(card) {
+  const list = card.querySelector('.rec-list');
   const arrow = card.querySelector('.card-arrow');
   list.classList.toggle('show');
   arrow.textContent = list.classList.contains('show') ? '▼' : '▶';
 }
 
-function toggleGrid(item) {
+function toggleRecItem(item) {
   item.querySelector('.grid-list').classList.toggle('show');
 }
+
+function toggleProj(card) {}
 
 async function collectData() {
   const btn = document.getElementById('btnCollect');
@@ -305,18 +439,23 @@ async function saveCron() {
 }
 
 // 集合14/16元数据卡片（纯读表，零计算）
+let _metaExpandCache = {};  // {14: html, 16: html}
+
 async function loadMetaCards(date) {
   try {
     const resp = await fetch('api/export/collection-meta?date=' + date);
     const data = await resp.json();
     const colors = {14: '#2196F3', 16: '#E91E63'};
+    const countN = {14: 4, 16: 6};
     let html = '';
     (data.collections || []).forEach(c => {
-      html += '<div class="meta-card" style="background:'+(colors[c.collection_id]||'#666')+'">' +
+      html += '<div class="meta-card" style="background:'+(colors[c.collection_id]||'#666')+'" onclick="toggleMetaCard(this,'+c.collection_id+',\''+date+'\')">' +
         '<div class="mc-label">集合' + c.collection_id + ' · ' + (c.draw_number||'-') + '</div>' +
         '<div class="mc-result">' + (c.result||'--') + '</div>' +
         '<div class="mc-rank">排位 ' + (c.rank||'--') + '</div>' +
-      '</div>';
+        '<div class="mc-arrow">▶</div>' +
+      '</div>' +
+      '<div class="meta-expand" id="metaExpand'+c.collection_id+'"></div>';
     });
     document.getElementById('metaCards').innerHTML = html || '<div style="color:#999;font-size:13px;padding:8px">无 meta 数据</div>';
   } catch(e) {
@@ -324,9 +463,127 @@ async function loadMetaCards(date) {
   }
 }
 
+async function toggleMetaCard(card, cid, date) {
+  const expand = document.getElementById('metaExpand'+cid);
+  const arrow = card.querySelector('.mc-arrow');
+  if (expand.classList.contains('show')) {
+    expand.classList.remove('show');
+    arrow.textContent = '▶';
+    return;
+  }
+  if (_metaExpandCache[cid]) {
+    expand.innerHTML = _metaExpandCache[cid];
+    expand.classList.add('show');
+    arrow.textContent = '▼';
+    return;
+  }
+  expand.innerHTML = '<div style="padding:8px;color:#999;font-size:12px">加载中...</div>';
+  expand.classList.add('show');
+  arrow.textContent = '▼';
+  try {
+    const maxN = cid === 14 ? 4 : 6;
+    const [sumResp, detailResp, gridResp] = await Promise.all([
+      fetch('api/export/daily-summary?collection_id=19&date=' + date),
+      fetch('api/export/daily-detail?collection_id=19&date=' + date),
+      fetch('api/export/grid-detail?collection_id=19&date=' + date)
+    ]);
+    const sumData = await sumResp.json();
+    const detailData = await detailResp.json();
+    const gridData = await gridResp.json();
+    const summaries = (sumData.summaries || []).slice(0, maxN);
+    const allProjects = detailData.summaries || {};
+    const allGrids = gridData.grids || {};
+    
+    let rows = '<div class="me-title">← 来自集合19前'+maxN+'条汇总</div>';
+    summaries.forEach(s => {
+      const projects = allProjects[s.name] || [];
+      const grids = allGrids[s.name] || [];
+      const recHtml = buildRecordList(projects, grids, s.name);
+      const rgSet = new Set(projects.map(p => p.run_group).filter(Boolean));
+      const rankHtml = s.draw_value_rank ? '<span class="me-rank">排位 '+s.draw_value_rank+'</span>' : '';
+      const miniArrow = '<span class="me-mini-arrow">▶</span>';
+      rows += '<div class="me-mini-card"><div class="me-mini-header" onclick="event.stopPropagation();toggleMiniCard(this)"><div style="display:flex;align-items:center;gap:6px">'+miniArrow+'<span class="me-mini-name">'+s.name+'</span>'+rankHtml+'</div><div><span class="me-val">'+(s.total_value||0).toLocaleString()+'</span></div></div><div class="me-mini-meta">'+rgSet.size+' 记录 · '+projects.length+' 项目</div><div class="rec-list me-mini-rec">'+recHtml+'</div></div>';
+    });
+    _metaExpandCache[cid] = rows;
+    expand.innerHTML = rows;
+  } catch(e) {
+    expand.innerHTML = '<div style="padding:8px;color:#ee0a24;font-size:12px">加载失败: '+e.message+'</div>';
+  }
+}
+
+// ── 预警系统 ──
+function toggleBellSettings() {
+  const popup = document.getElementById('bellPopup');
+  const show = popup.style.display === 'none' || !popup.style.display;
+  popup.style.display = show ? 'block' : 'none';
+  if (show) {
+    document.getElementById('alertThreshold').value = _alertThreshold;
+  }
+}
+async function saveBellSettings() {
+  _alertThreshold = parseInt(document.getElementById('alertThreshold').value) || 45;
+  toggleBellSettings();
+  // 保存到服务端
+  try {
+    await fetch(API + '/settings', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({alert_threshold: _alertThreshold})
+    });
+  } catch(e) {}
+  loadData();
+}
+function checkAlerts() {
+  const alerts = [];
+  for (const [sname, rgs] of Object.entries(_recordRanks)) {
+    const dangerCount = rgs.filter(r => r.rank !== null && r.rank > _alertThreshold).length;
+    if (dangerCount >= 3) {
+      alerts.push({summary: sname, count: dangerCount, rgs: rgs});
+    }
+  }
+  const banner = document.getElementById('alertBanner');
+  const bell = document.getElementById('bellBtn');
+  const badge = document.getElementById('bellBadge');
+  if (alerts.length > 0) {
+    const msgs = alerts.map(a => {
+      const worst = a.rgs.filter(r=>r.rank!==null&&r.rank>_alertThreshold)
+        .sort((a,b)=>(b.rank||0)-(a.rank||0));
+      const worstNames = worst.slice(0,3).map(r=>r.run_group+' 排位'+r.rank).join(', ');
+      return '<b>'+a.summary+'</b>: '+a.count+'条记录排位>'+_alertThreshold+' ('+worstNames+')';
+    });
+    banner.innerHTML = '⚠️ ' + msgs.join('<br>');
+    banner.style.display = 'block';
+    bell.classList.add('has-alert');
+    badge.textContent = alerts.length;
+    badge.classList.add('show');
+  } else {
+    banner.style.display = 'none';
+    bell.classList.remove('has-alert');
+    badge.classList.remove('show');
+  }
+}
+function scrollToFirstAlert() {
+  const firstDanger = document.querySelector('.rec-rank-badge.danger');
+  if (firstDanger) {
+    firstDanger.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+}
+
+async function initSettings() {
+  try {
+    const resp = await fetch(API + '/settings');
+    const data = await resp.json();
+    if (data.alert_threshold) {
+      _alertThreshold = parseInt(data.alert_threshold) || 45;
+    }
+  } catch(e) {}
+}
+
 // 初始化
 loadCron();
-initCollection().then(function() {
+initSettings().then(function() {
+  return initCollection();
+}).then(function() {
   return initDefaultDate();
 }).then(function(d) {
   document.getElementById('dateInput').value = d;
