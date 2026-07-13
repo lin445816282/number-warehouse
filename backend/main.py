@@ -2281,13 +2281,20 @@ def _build_49_grid(db, project_ids: list, target_date: str = None, run_ids: list
 
 
 @app.get("/api/run-groups/{rgid}/grid")
-def get_run_group_grid(rgid: int, date: str = None):
-    """记录组: 49值聚合（按项目最新 sim_run）"""
+def get_run_group_grid(rgid: int, date: str = None, project_ids: str = None):
+    """记录组: 49值聚合（按项目最新 sim_run）。project_ids 可选过滤"""
     db = get_db()
     items = db.execute(
         "SELECT project_id FROM run_group_items WHERE run_group_id=?", (rgid,)
     ).fetchall()
-    ids = [i["project_id"] for i in items]
+    all_ids = [i["project_id"] for i in items]
+    if project_ids and project_ids.strip():
+        filter_ids = [int(x) for x in project_ids.split(",") if x.strip()]
+        ids = [x for x in filter_ids if x in all_ids]
+    elif project_ids is not None and not project_ids.strip():
+        ids = []
+    else:
+        ids = all_ids
     result = _build_49_grid(db, ids, date)
     db.close()
     return result
@@ -2312,14 +2319,30 @@ def get_project_grid(pid: int, date: str = None):
 
 
 @app.get("/api/summaries/{sid}/grid")
-def get_summary_grid(sid: int, date: str = None):
-    """汇总: 49值聚合(跨所有记录组)"""
+def get_summary_grid(sid: int, date: str = None, run_group_ids: str = None):
+    """汇总: 49值聚合。run_group_ids 可选过滤指定记录组"""
     db = get_db()
-    items = db.execute(
-        "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
-        "JOIN run_groups rg ON rgi.run_group_id=rg.id "
-        "WHERE rg.summary_id=?", (sid,)
-    ).fetchall()
+    if run_group_ids and run_group_ids.strip():
+        rg_ids = [int(x) for x in run_group_ids.split(",") if x.strip()]
+        p = ",".join("?" * len(rg_ids))
+        items = db.execute(
+            f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+            f"WHERE rgi.run_group_id IN ({p})", rg_ids
+        ).fetchall()
+    elif run_group_ids is not None and not run_group_ids.strip():
+        ids = []
+        db.close()
+        return _build_49_grid(db, ids, date)
+    else:
+        items = db.execute(
+            "SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
+            "JOIN run_groups rg ON rgi.run_group_id=rg.id "
+            "WHERE rg.summary_id=?", (sid,)
+        ).fetchall()
+        ids = [i["project_id"] for i in items]
+        result = _build_49_grid(db, ids, date)
+        db.close()
+        return result
     ids = [i["project_id"] for i in items]
     result = _build_49_grid(db, ids, date)
     db.close()
@@ -3829,14 +3852,26 @@ def export_collection_info(collection_id: int):
 
 @app.get("/api/export/latest-snapshot-date")
 def latest_snapshot_date(collection_id: int):
-    """返回最新快照日期"""
+    """返回最新有抽签数的快照日期"""
     db = get_db()
     row = db.execute(
-        "SELECT MAX(date) as dt FROM daily_snapshots WHERE collection_id=?",
+        "SELECT MAX(date) as dt FROM daily_snapshots WHERE collection_id=? AND draw_number IS NOT NULL AND draw_number > 0",
         (collection_id,)
     ).fetchone()
     db.close()
     return {"date": row["dt"] if row and row["dt"] else None}
+
+
+@app.get("/api/export/available-dates")
+def available_dates(collection_id: int):
+    """返回有快照数据的日期列表（含抽签数），用于已同步标记"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT DISTINCT date, draw_number FROM daily_snapshots WHERE collection_id=? AND draw_number IS NOT NULL AND draw_number > 0 ORDER BY date DESC LIMIT 60",
+        (collection_id,)
+    ).fetchall()
+    db.close()
+    return {"dates": [{"date": r["date"], "draw_number": r["draw_number"]} for r in rows]}
 
 
 @app.get("/api/export/collection-meta")
@@ -4259,7 +4294,7 @@ def get_threshold_results(date: str = None):
             use_date = stored_max or dt.today().isoformat()
 
     rows = db.execute(
-        "SELECT collection_id, threshold, numbers_json FROM collection_threshold_numbers WHERE date=? ORDER BY collection_id, threshold",
+        "SELECT collection_id, threshold, numbers_json FROM collection_threshold_numbers WHERE date=? AND collection_id != 0 ORDER BY collection_id, threshold",
         (use_date,)
     ).fetchall()
 

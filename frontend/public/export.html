@@ -12,6 +12,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .date-bar { display:flex; gap:8px; margin:12px 0; align-items:center; }
 .date-bar input { flex:1; padding:8px 12px; border:1px solid #d0d5dd; border-radius:8px; font-size:15px; background:#fff; }
 .date-bar button { padding:8px 18px; background:#1a73e8; color:#fff; border:none; border-radius:8px; font-size:14px; cursor:pointer; font-weight:600; }
+.avail-dates { display:flex; gap:4px; padding:4px 0 8px; overflow-x:auto; -webkit-overflow-scrolling:touch; flex-wrap:nowrap; }
+.avail-dates .ad-pill {
+  flex-shrink:0; padding:3px 10px; border-radius:12px; font-size:11px;
+  background:#e8f0fe; color:#1a73e8; cursor:pointer; white-space:nowrap;
+  border:1px solid transparent; font-weight:600; transition:all .15s;
+}
+.avail-dates .ad-pill:active { transform:scale(.94); }
+.avail-dates .ad-pill.active { background:#1a73e8; color:#fff; }
+.avail-dates .ad-label { font-size:9px; color:#8899b0; flex-shrink:0; padding:4px 2px; }
 .date-info { font-size:17px; font-weight:700; text-align:center; padding:4px 0 8px; }
 .day-seq { font-size:13px; color:#888; text-align:center; padding:0 0 8px; }
 .amount-box { background:linear-gradient(135deg,#1a73e8,#0d47a1); color:#fff; border-radius:12px; padding:18px; text-align:center; margin:8px 0 12px; }
@@ -129,6 +138,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   <input type="date" id="dateInput">
   <button onclick="loadData()">查询</button>
 </div>
+<div class="avail-dates" id="availDates"></div>
 
 <div class="amount-box">
   <div class="label">累计总额</div>
@@ -255,7 +265,7 @@ async function loadData() {
       document.getElementById('cardList').innerHTML = renderCards(sumData.summaries, detailData.summaries || {}, gridData.grids || {});
       checkAlerts();
     }
-    
+    renderAvailDates();
   } catch(e) {
     document.getElementById('cardList').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
   }
@@ -582,13 +592,41 @@ async function initSettings() {
   } catch(e) {}
 }
 
+// 已同步日期列表
+var _availDates = [];
+async function loadAvailDates() {
+  try {
+    var resp = await fetch(API + '/available-dates?collection_id=' + CID);
+    var data = await resp.json();
+    _availDates = data.dates || [];
+    renderAvailDates();
+  } catch(e) {}
+}
+function renderAvailDates() {
+  var el = document.getElementById('availDates');
+  var cur = document.getElementById('dateInput').value;
+  var html = '<span class="ad-label">已同步</span>';
+  for (var i = 0; i < _availDates.length; i++) {
+    var d = _availDates[i];
+    var short = d.date.slice(5); // MM-DD
+    var active = d.date === cur ? ' active' : '';
+    html += '<span class="ad-pill' + active + '" data-date="' + d.date + '" onclick="pickAvailDate(\'' + d.date + '\')">' + short + '</span>';
+  }
+  el.innerHTML = html;
+}
+function pickAvailDate(d) {
+  document.getElementById('dateInput').value = d;
+  loadData();
+}
+
 // 初始化
 loadCron();
 initSettings().then(function() {
   return initCollection();
 }).then(function() {
-  return initDefaultDate();
-}).then(function(d) {
+  return Promise.all([initDefaultDate(), loadAvailDates()]);
+}).then(function(results) {
+  var d = results[0];
   document.getElementById('dateInput').value = d;
   loadData();
 });
