@@ -1578,6 +1578,7 @@ class SimRunRequest(BaseModel):
     project_ids: list  # [project_id, ...]  — 多项目并行
     start_date: str = "2020-03-18"
     end_date: str = "2026-07-03"
+    skip_refresh: bool = False  # 批量执行时先跳过后端分析刷新，最后统一刷
 
 
 @app.post("/api/sim/run")
@@ -1607,7 +1608,7 @@ def run_simulation_endpoint(body: SimRunRequest):
             except Exception as e:
                 import traceback
                 errors.append({"project_id": pid, "rule_id": rid, "error": str(e), "traceback": traceback.format_exc()[-500:]})
-        if not all_skipped:
+        if not all_skipped and not body.skip_refresh:
             try:
                 refresh_analysis(db)
             except Exception as re:

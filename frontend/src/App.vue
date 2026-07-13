@@ -1062,7 +1062,21 @@
         </div>
       </div>
     </div>
-    <!-- 弹窗：单项目 49 格明细 -->
+    <!-- 弹窗：演算进度 -->
+    <div v-if="trProgress.show" class="form-overlay" style="z-index:1001">
+      <div class="form-card" style="max-width:340px;text-align:center">
+        <div class="form-title">⚡ 演算中 · 步骤 {{ trProgress.step }}/{{ trProgress.totalSteps }}</div>
+        <div style="padding:8px 0;color:#5a6b85;font-size:13px">{{ trProgress.msg }}</div>
+        <div v-if="trProgress.errors" style="font-size:11px;color:#dc2626;margin-top:4px">{{ trProgress.errors }}</div>
+        <div style="background:#f0f3f8;border-radius:8px;height:10px;margin:12px 0 4px;overflow:hidden">
+          <div :style="{width:(trProgress.step/trProgress.totalSteps*100)+'%',height:'100%',background:'linear-gradient(90deg,#22c55e,#0ea5e9)',transition:'width .3s'}"></div>
+        </div>
+        <div style="font-size:11px;color:#8899b0">{{ trProgress.done }}/{{ trProgress.total }} 个项目完成</div>
+        <div v-if="trProgress.step === trProgress.totalSteps" class="form-btns" style="margin-top:12px">
+          <button class="btn-submit" @click="trProgress.show=false">关闭</button>
+        </div>
+      </div>
+    </div>
     <div v-if="showProjDetail" class="form-overlay" @click.self="showProjDetail=false">
       <div class="form-card" style="max-width:420px">
         <div class="form-title">{{ projDetail?.project_name }} · 49格明细</div>
@@ -2555,6 +2569,7 @@ const trSID = computed(() => trCID.value && trL2.value !== '')
 const scopeSummaries = ref([])
 const scopeRunGroups = ref([])
 const scopeProjects = ref([])
+const trProgress = reactive({ show: false, step: 0, totalSteps: 0, msg: '', done: 0, total: 0, errors: '' })
 
 const canTodayRun = computed(() => scopeProjects.value.length > 0 && todayRunDate.value)
 
@@ -2621,52 +2636,78 @@ async function loadTrScopeProjects() {
 
 async function execTodayRun() {
   if (!canTodayRun.value) return
-  todayRunRunning.value = true
-  try {
-    const pids = scopeProjects.value.map(p => p.project_id)
-    const rids = scopeProjects.value.map(p => p.rule_id || 0)
-    const res = await fetch(`${API}/sim/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rule_ids: rids,
-        project_ids: pids,
-        start_date: todayRunDate.value,
-        end_date: todayRunDate.value,
-      }),
+  const pids = scopeProjects.value.map(p => p.project_id)
+  const rids = scopeProjects.value.map(p => p.rule_id || 0)
+  const total = pids.length
+  const CHUNKS = 3
+  const chunkSize = Math.ceil(total / CHUNKS)
+
+  // 关掉表单弹窗，开进度弹窗
+  showTodayRun.value = false
+  Object.assign(trProgress, { show: true, step: 0, totalSteps: CHUNKS, msg: '准备中...', done: 0, total, errors: '' })
+
+  let allRuns = [], allErrors = [], totalHits = 0, totalDays = 0, totalAdjusted = 0
+
+  for (let i = 0; i < CHUNKS; i++) {
+    const start = i * chunkSize
+    const end = Math.min(start + chunkSize, total)
+    if (start >= total) break
+
+    const chunkPids = pids.slice(start, end)
+    const chunkRids = rids.slice(start, end)
+    const isLastChunk = (i === CHUNKS - 1 || end >= total)
+
+    Object.assign(trProgress, {
+      step: i + 1, msg: `正在演算第 ${start+1}-${end} 个项目（共 ${chunkPids.length} 项）...`, done: start
     })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.detail || '运行失败')
-    const runs = data.runs || []
-    const errors = data.errors || []
-    const hits = runs.reduce((s, r) => s + (r.hit_count || 0), 0)
-    const days = runs.reduce((s, r) => s + (r.total_days || 0), 0)
-    let msg = `✅ 演算完成 ${runs.length}项目 · 命中 ${hits}/${days}`
-    if (errors.length) {
-      if (runs.length === 0) {
-        // 全部失败 → 显示红色错误
-        $notify(errors[0].error, true)
-        showTodayRun.value = false
-        todayRunRunning.value = false
-        return
+
+    try {
+      const res = await fetch(`${API}/sim/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rule_ids: chunkRids,
+          project_ids: chunkPids,
+          start_date: todayRunDate.value,
+          end_date: todayRunDate.value,
+          skip_refresh: !isLastChunk  // 最后一批才刷新分析
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || '运行失败')
+
+      const runs = data.runs || []
+      const errs = data.errors || []
+      totalHits += runs.reduce((s, r) => s + (r.hit_count || 0), 0)
+      totalDays += runs.reduce((s, r) => s + (r.total_days || 0), 0)
+      totalAdjusted += runs.filter(r => r.message && r.message.includes('调整')).length
+      allRuns = allRuns.concat(runs)
+      allErrors = allErrors.concat(errs)
+
+      Object.assign(trProgress, { done: end })
+      if (errs.length) {
+        trProgress.errors = `⚠️ 第${i+1}批: ${errs.length}项失败`
       }
-      msg += ` · ⚠️ ${errors.length}项失败`
+    } catch (e) {
+      allErrors.push({ phase: `batch_${i+1}`, error: e.message })
+      trProgress.errors = `❌ 第${i+1}批连接失败: ${e.message}`
     }
-    const adjusted = runs.filter(r => r.message && r.message.includes('调整'))
-    if (adjusted.length) msg += ` · ⚠️ ${adjusted.length}项日期被自动调整`
-    // 错误详情摘要
-    if (errors.length) {
-      const errSummary = errors.slice(0, 3).map(e => 
-        e.phase ? `[${e.phase}] ${e.error}` : `[PID${e.project_id}] ${e.error?.slice(0,40)}`
-      ).join('；')
-      msg += `\n异常: ${errSummary}${errors.length > 3 ? ` ...等${errors.length}项` : ''}`
+  }
+
+  // 最后一批已做 refresh_analysis，这里直接显示结果
+  let msg = `✅ 演算完成 ${allRuns.length}项目 · 命中 ${totalHits}/${totalDays}`
+  if (allErrors.length) {
+    if (allRuns.length === 0) {
+      trProgress.errors = allErrors[0].error || '全部失败'
+      return
     }
-    $notify(msg)
-    if (errors.length) console.warn('演算失败项:', errors)
-    if (adjusted.length) console.warn('日期调整项:', adjusted.map(r => r.message))
-    showTodayRun.value = false
-  } catch (e) { $notify(e.message, true) }
-  todayRunRunning.value = false
+    msg += ` · ⚠️ ${allErrors.length}项失败`
+  }
+  if (totalAdjusted) msg += ` · ⚠️ ${totalAdjusted}项日期被自动调整`
+
+  Object.assign(trProgress, { step: CHUNKS, done: total, msg, errors: '' })
+  $notify(msg)
+  if (allErrors.length) console.warn('演算失败项:', allErrors)
 }
 
 // ===== 一键清空模拟数据 =====
