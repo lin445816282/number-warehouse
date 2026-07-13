@@ -1217,7 +1217,7 @@ async function computeThreshold() {
 function copyThNumbers(grp, th) {
   const nums = grp.thresholds[th]?.numbers
   if (!nums || nums.length === 0) return
-  navigator.clipboard.writeText(nums.join(','))
+  navigator.clipboard.writeText(nums.join('.'))
     .then(() => $notify(`已复制${th}个号码`), () => $notify('复制失败', true))
 }
 
@@ -2061,6 +2061,7 @@ function getProjectName(pid) {
 const grid49 = ref(null)
 const gridDate = ref('')
 const showGridProj = ref(false)
+let gridRequestId = 0   // 请求序号，防止竞态
 const gridLevel = ref('')
 const gridId = ref(null)
 const selectedSummaryIds = ref([])  // 选中的汇总ID
@@ -2224,6 +2225,7 @@ async function loadAllSimRules() {
 }
 
 async function loadGrid(level, id, date = '', extraParams = '') {
+  const reqId = ++gridRequestId
   try {
     let url = level === 'collection' ? `${API}/collections/${id}/grid`
             : level === 'summary' ? `${API}/summaries/${id}/grid`
@@ -2234,6 +2236,7 @@ async function loadGrid(level, id, date = '', extraParams = '') {
     if (params.length) url += '?' + params.join('&')
     const res = await fetch(url)
     const data = await res.json()
+    if (reqId !== gridRequestId) return  // 已被更新的请求取代，丢弃
     console.log('loadGrid', level, id, 'cells:', data.grid?.length, 'proj:', data.projects?.length)
     grid49.value = data
     gridLevel.value = level
