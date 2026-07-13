@@ -28,7 +28,7 @@ _failed_attempts: defaultdict[str, list[float]] = defaultdict(list)
 _lockout_until: dict[str, float] = {}
 
 # 路由白名单：无需认证
-_WHITELIST = {"/auth/login", "/auth/logout", "/favicon.ico"}
+_WHITELIST = {"/auth/login", "/auth/logout", "/favicon.ico", "/api/threshold/results", "/api/threshold/compute", "/api/threshold"}
 
 # ===== 工具函数 =====
 

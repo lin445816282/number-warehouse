@@ -7,15 +7,15 @@
 
     <!-- 视图切换 -->
     <div class="view-tabs">
-      <span :class="{ active: view === 'collection' }" @click="view = 'collection'; loadCollections()">📁 集合</span>
-      <span :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">📈 分析</span>
-      <span :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">🚀 演算</span>
-      <span :class="{ active: view === 'profit' }" @click="view = 'profit'; loadCollections(); loadProfit()">💰 盈亏</span>
-      <span :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">📋 记录</span>
-      <span :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">⚙ 组别</span>
-      <span :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">📐 规则</span>
-      <span :class="{ active: view === 'threshold' }" @click="view = 'threshold'; loadThreshold()">🎯 阈值</span>
-      <span :class="{ active: view === 'export' }" @click="view = 'export'">🔄 同步</span>
+      <button :class="{ active: view === 'collection' }" @click="view = 'collection'; loadCollections()">集合</button>
+      <button :class="{ active: view === 'export' }" @click="view = 'export'">同步</button>
+      <button :class="{ active: view === 'threshold' }" @click="view = 'threshold'; loadThreshold()">阈值</button>
+      <button :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">记录</button>
+      <button :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">分析</button>
+      <button :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">演算</button>
+      <button :class="{ active: view === 'profit' }" @click="view = 'profit'; loadCollections(); loadProfit()">盈亏</button>
+      <button :class="{ active: view === 'groupset' }" @click="view = 'groupset'; loadProjects(); loadSimRules()">组别</button>
+      <button :class="{ active: view === 'rules' }" @click="view = 'rules'; loadDevRules(); loadMapping()">规则</button>
     </div>
 
     <!-- 数据记录视图 -->
@@ -293,13 +293,13 @@
         </div>
         <div v-if="showClearControl" class="mapping-body">
           <div style="display:flex;align-items:center;gap:10px;padding:8px 0;flex-wrap:wrap">
-            <span style="font-size:13px;color:#8899b0">分析 / 演算 清空按钮：</span>
+            <span style="font-size:13px;color:#8899b0">分析/演算清空 + 集合删除：</span>
             <button class="btn-add-sm"
               :style="{background:allowClear?'#22c55e':'#ccc',color:'#fff'}"
               @click="allowClear=!allowClear">
               {{ allowClear ? '✅ 已开启' : '⛔ 已关闭' }}
             </button>
-            <span style="font-size:11px;color:#8899b0">{{ allowClear ? '清空按钮可用，可操作' : '清空按钮已锁定（防误触）' }}</span>
+            <span style="font-size:11px;color:#8899b0">{{ allowClear ? '清空/删除按钮可用' : '清空/删除按钮已锁定（防误触）' }}</span>
           </div>
         </div>
       </div>
@@ -314,10 +314,13 @@
     <div v-if="view === 'threshold'" class="threshold-view">
       <div class="sim-header">
         <span class="sim-title">🎯 复制25/24</span>
-        <button class="btn-add" @click="computeThreshold" :disabled="thComputing">
-          <span v-if="thComputing" class="btn-spin"></span>
-          {{ thComputing ? '计算中' : '计算' }}
-        </button>
+        <div style="display:flex;align-items:center;gap:6px">
+          <a href="api-doc.html" target="_blank" class="th-doc-link" title="API 文档">📋</a>
+          <button class="btn-add" @click="computeThreshold" :disabled="thComputing">
+            <span v-if="thComputing" class="btn-spin"></span>
+            {{ thComputing ? '计算中' : '计算' }}
+          </button>
+        </div>
       </div>
       <!-- 日期选择 -->
       <div class="th-date-row">
@@ -761,10 +764,16 @@
       </div>
       <div class="col-crumb" v-if="colSel">
         <span @click="backTo('collections')">📁 集合</span>
-        <template v-if="sumSel">
+        <template v-if="sumSel || activeRecordId">
           <span class="crumb-sep">›</span>
           <span @click="backTo('summaries')">{{ colSel?.name }}</span>
-          <template v-if="rgSel">
+          <template v-if="activeRecordId">
+            <span class="crumb-sep">›</span>
+            <span @click="clearActiveRecord">{{ sumSel?.name }}</span>
+            <span class="crumb-sep">›</span>
+            <span class="crumb-end">{{ activeRecordName }}</span>
+          </template>
+          <template v-else-if="rgSel">
             <span class="crumb-sep">›</span>
             <span @click="backTo('run_groups')">{{ sumSel?.name }}</span>
             <span class="crumb-sep">›</span>
@@ -795,8 +804,21 @@
         </div>
         <div v-if="summaries.length && !sumSel" class="sum-chips">
           <span v-for="s in summaries" :key="s.id" class="sum-chip"
-                :class="{active: allSelected || selectedSummaryIds.includes(s.id)}"
+                :class="{active: selectedSummaryIds.includes(s.id)}"
                 @click="toggleSummary(s.id)">{{ stripGrade(s.name) }}</span>
+        </div>
+        <div v-if="runGroups.length && sumSel && !activeRecordId && !rgSel" class="grid49-range">
+          <span v-for="rg in runGroups" :key="rg.id" class="rg-pill"
+                :class="{active: selectedRunGroupIds.includes(rg.id)}"
+                @click="toggleRunGroup(rg.id)">{{ rg.name }}</span>
+        </div>
+        <div v-if="showRecordProjects && recordProjects.length">
+          <div class="grid49-range">
+            <span v-for="p in recordProjects" :key="p.project_id" class="rg-pill"
+                  :class="{active: selectedProjectIds.includes(p.project_id)}"
+                  @click="toggleProject(p.project_id)"
+                  @dblclick="openProjGridFromG49(p)">{{ p.project_name }}</span>
+          </div>
         </div>
         <div class="grid49-table">
           <div v-for="g in grid49.grid" :key="g.n" class="grid49-cell" :class="{zero:g.value===0}">
@@ -804,7 +826,7 @@
             <span class="g49-v">{{ g.value }}</span>
           </div>
         </div>
-        <div class="grid49-proj" v-if="grid49.projects?.length">
+        <div class="grid49-proj" v-if="!showRecordProjects && grid49.projects?.length">
           <div class="g49-proj-title" @click="showGridProj=!showGridProj">
             各项目最新值 ({{ grid49.projects.length }}) {{ showGridProj ? '▼' : '▶' }}
           </div>
@@ -823,7 +845,7 @@
           <div class="col-card-left">
             <span class="col-card-name">📁 {{ c.name }}</span>
           </div>
-          <button class="col-del" @click.stop="delCollection(c.id)">🗑</button>
+          <button class="col-del" @click.stop="delCollection(c.id)" :disabled="!allowClear" :style="{opacity:allowClear?1:0.3,cursor:allowClear?'pointer':'not-allowed'}">🗑</button>
           <span class="col-card-arrow">›</span>
         </div>
       </div>
@@ -863,7 +885,7 @@
             </span>
           </div>
           <span class="col-card-value" style="color:#22c55e;font-weight:700">¥{{ (rg.total_value||0).toLocaleString() }}</span>
-          <button class="col-del" @click.stop="delRunGroup(rg.id)">🗑</button>
+          <button class="col-del" @click.stop="delRunGroup(rg.id)" :disabled="!allowClear" :style="{opacity:allowClear?1:0.3,cursor:allowClear?'pointer':'not-allowed'}">🗑</button>
         </div>
       </div>
       <div v-if="rgSel">
@@ -2041,8 +2063,7 @@ const gridDate = ref('')
 const showGridProj = ref(false)
 const gridLevel = ref('')
 const gridId = ref(null)
-const selectedSummaryIds = ref([])  // 空=全选，有值=指定汇总ID
-const allSelected = computed(() => selectedSummaryIds.value.length === 0)
+const selectedSummaryIds = ref([])  // 选中的汇总ID
 
 function stripGrade(name) {
   return name.replace(/^[A-Z]级\s*/, '')
@@ -2050,6 +2071,76 @@ function stripGrade(name) {
 const gridTotalSum = ref(0)
 const gridDrawVal = ref(null)
 const gridResult = ref(null)
+
+// 记录选择（汇总级：勾选哪些 runGroup 参与 1-49 格计算）
+const selectedRunGroupIds = ref([])
+const activeRecordId = ref(null)
+const recordProjects = ref([])
+const showRecordProjects = ref(false)
+const selectedProjectIds = ref([])
+watch(runGroups, (newVal) => {
+  selectedRunGroupIds.value = newVal.map(r => r.id)
+  activeRecordId.value = null
+  recordProjects.value = []
+  showRecordProjects.value = false
+})
+
+function toggleRunGroup(id) {
+  const idx = selectedRunGroupIds.value.indexOf(id)
+  if (idx >= 0) {
+    // 至少保留一个
+    if (selectedRunGroupIds.value.length <= 1) return
+    selectedRunGroupIds.value.splice(idx, 1)
+  } else {
+    selectedRunGroupIds.value = [...selectedRunGroupIds.value, id]
+  }
+  // 重新加载汇总级49格（按选中记录组过滤）
+  if (sumSel.value) {
+    const ids = selectedRunGroupIds.value.join(',')
+    loadGrid('summary', sumSel.value.id, gridDate.value, ids ? `run_group_ids=${ids}` : 'run_group_ids=')
+  }
+}
+
+const activeRecordName = computed(() => {
+  const rg = runGroups.value.find(r => r.id === activeRecordId.value)
+  return rg?.name || ''
+})
+
+function clearActiveRecord() {
+  activeRecordId.value = null
+  recordProjects.value = []
+  showRecordProjects.value = false
+  rgSel.value = null
+}
+
+async function loadRecordProjects(rgId) {
+  // 从已加载的 grid49 同步项目列表（loadGrid 已请求过）
+  const g = grid49.value
+  if (g?.projects?.length) {
+    recordProjects.value = g.projects
+    showRecordProjects.value = true
+    selectedProjectIds.value = g.projects.map(p => p.project_id)
+  } else {
+    recordProjects.value = []
+    showRecordProjects.value = false
+    selectedProjectIds.value = []
+  }
+}
+
+function toggleProject(pid) {
+  const idx = selectedProjectIds.value.indexOf(pid)
+  if (idx >= 0) {
+    if (selectedProjectIds.value.length <= 1) return
+    selectedProjectIds.value.splice(idx, 1)
+  } else {
+    selectedProjectIds.value = [...selectedProjectIds.value, pid]
+  }
+  // 重新加载 1-49 格（仅聚合选中项目）
+  const rgId = rgSel.value?.id || activeRecordId.value
+  if (!rgId) return
+  const ids = selectedProjectIds.value.join(',')
+  loadGrid('run_group', rgId, gridDate.value, ids ? `project_ids=${ids}` : 'project_ids=')
+}
 
 function recalcFormula() {
   const g = grid49.value
@@ -2148,6 +2239,15 @@ async function loadGrid(level, id, date = '', extraParams = '') {
     gridLevel.value = level
     gridId.value = id
     gridDate.value = date || grid49.value?.last_date || ''
+    // run_group 级别：同步项目列表，默认全选
+    if (level === 'run_group' && data.projects?.length) {
+      // 仅在首次加载（非 toggleProject 过滤时）更新项目列表
+      if (!extraParams) {
+        recordProjects.value = data.projects
+        selectedProjectIds.value = data.projects.map(p => p.project_id)
+      }
+      showRecordProjects.value = true
+    }
   } catch (e) { grid49.value = null }
 }
 
@@ -2192,6 +2292,11 @@ function getProjGrid(pid) {
 }
 
 function backTo(level) {
+  // 清除项目选择状态
+  activeRecordId.value = null
+  recordProjects.value = []
+  showRecordProjects.value = false
+  selectedProjectIds.value = []
   if (level === 'collections') {
     colSel.value = null; sumSel.value = null; rgSel.value = null; grid49.value = null
   } else if (level === 'summaries') {
@@ -2201,24 +2306,22 @@ function backTo(level) {
   }
 }
 
-function selectCollection(c) {
+async function selectCollection(c) {
   colSel.value = c; sumSel.value = null; rgSel.value = null; colSubTab.value = 'summary'
-  loadSummaries(c.id); loadColProjects(c.id)
-  selectedSummaryIds.value = []  // 默认全选
+  await loadSummaries(c.id)
+  selectedSummaryIds.value = summaries.value.map(s => s.id)  // 默认全选
+  loadColProjects(c.id)
   loadGrid('collection', c.id)
   loadNumSummaryMap(c.id)
 }
 
 function toggleSummary(sid) {
-  if (allSelected.value) {
-    selectedSummaryIds.value = [sid]
+  const found = selectedSummaryIds.value.includes(sid)
+  if (found) {
+    if (selectedSummaryIds.value.length <= 1) return
+    selectedSummaryIds.value = selectedSummaryIds.value.filter(id => id !== sid)
   } else {
-    const found = selectedSummaryIds.value.includes(sid)
-    if (found) {
-      selectedSummaryIds.value = selectedSummaryIds.value.filter(id => id !== sid)
-    } else {
-      selectedSummaryIds.value = [...selectedSummaryIds.value, sid]
-    }
+    selectedSummaryIds.value = [...selectedSummaryIds.value, sid]
   }
   const ids = selectedSummaryIds.value
   const params = ids.length === 0 ? '' : 'summary_ids=' + ids.join(',')
@@ -2232,6 +2335,7 @@ function selectSummary(s) {
 
 function selectRunGroup(rg) {
   rgSel.value = rg; loadRgItems(rg.id); loadGrid('run_group', rg.id)
+  activeRecordId.value = rg.id
 }
 
 async function loadSummaries(cid) {
@@ -2754,17 +2858,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .tb-logout:hover { border-color: #ff6b6b; color: #ff6b6b; }
 
 .view-tabs {
-  display: flex; background: #fff; border-bottom: 1px solid #e8ecf1;
-  position: sticky; top: 0; z-index: 10; overflow-x: auto;
+  display: flex; gap: 3px; padding: 6px 8px;
+  background: #f0f4f8; position: sticky; top: 0; z-index: 10;
 }
-.view-tabs span {
-  flex: 1; text-align: center; padding: 12px 4px;
-  font-size: 12px; color: #8899b0; cursor: pointer; transition: all .2s;
-  border-bottom: 3px solid transparent; white-space: nowrap;
+.view-tabs button {
+  flex: 1; min-width: 0; padding: 6px 0; border-radius: 16px;
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all .2s;
+  border: 1px solid #dde3ea; background: #fff; color: #66788a;
+  box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  white-space: nowrap; font-family: inherit; text-align: center;
 }
-.view-tabs span.active {
-  color: #4da6ff; font-weight: 700; font-size: 13px;
-  border-bottom-color: #4da6ff; background: linear-gradient(to top, #eef3ff, transparent 60%);
+.view-tabs button:active:not(.active) {
+  background: #e8ecf1; transform: scale(.96);
+}
+.view-tabs button.active {
+  background: linear-gradient(135deg, #1a2a4a, #2d4a7a);
+  color: #fff; border-color: #1a2a4a;
+  box-shadow: 0 3px 8px rgba(26,42,74,.35), 0 0 0 2px rgba(77,166,255,.25);
+  transform: translateY(-1px);
 }
 
 /* 卡片 */
@@ -3128,6 +3239,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 /* ===== 49值网格 ===== */
 .grid49-section { padding: 12px; margin: 8px 0; }
 .grid49-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; flex-wrap: wrap; gap: 4px; }
+.grid49-range { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 6px; }
+.grid49-range .rg-pill {
+  font-size: 12px; padding: 5px 14px; border-radius: 16px;
+  background: #1a2035; color: #8899aa; cursor: pointer; font-weight: 500;
+  border: 1px solid #243044; transition: all .15s;
+}
+.grid49-range .rg-pill.active {
+  background: #0d3b66; color: #4da6ff; border-color: #4da6ff;
+}
+.rg-breadcrumb {
+  font-size: 13px; color: #4da6ff; font-weight: 600; padding: 4px 0 6px;
+}
 .grid49-sum { font-weight: 700; font-size: 14px; }
 .grid49-table { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
 .grid49-cell { font-size: 10px; padding: 4px 2px; border-radius: 6px; background: #f8fafc; display: flex; flex-direction: column; align-items: center; }
@@ -3170,19 +3293,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 
 /* 汇总选择芯片 */
 .sum-chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
-.sum-chip { padding: 8px 18px; border-radius: 10px; font-size: 13px; font-weight: 600;
-  background: linear-gradient(135deg, #4da6ff, #1a2a4a); color: #fff; cursor: pointer;
-  transition: all .2s; border: none; user-select: none; opacity: 0.45; }
+.sum-chip { padding: 8px 18px; border-radius: 12px; font-size: 13px; font-weight: 600;
+  background: #1a2035; color: #8899aa; cursor: pointer;
+  transition: all .15s; border: 1px solid #243044; user-select: none; }
 .sum-chip.active {
-  opacity: 1;
-  box-shadow: 0 0 0 2px rgba(238,10,36,.35), 0 4px 16px rgba(77,166,255,.25);
-  transform: translateY(-1px);
+  background: #0d3b66; color: #4da6ff; border-color: #4da6ff;
 }
 
 /* ===== 阈值视图 ===== */
 .th-date-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 8px 12px 0; }
 .th-date-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #d0d5dd; background: #fff; font-size: 14px; color: #1a2a4a; }
 .th-draw { font-size: 15px; font-weight: 700; color: #e05a1e; white-space: nowrap; }
+.th-doc-link { font-size: 16px; text-decoration: none; line-height: 1; transition: transform .15s; }
+.th-doc-link:hover { transform: scale(1.15); }
 .th-col19-block { background: #eef4ff; border-radius: 10px; padding: 10px 14px; margin: 8px 12px; }
 .th-col19-title { font-size: 13px; font-weight: 600; color: #4da6ff; margin-bottom: 8px; }
 .th-col19-grid { display: flex; flex-wrap: wrap; gap: 6px; }

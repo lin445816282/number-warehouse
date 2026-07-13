@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>阈值 API 文档</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#333;padding:20px 16px 60px;font-size:14px;line-height:1.6;max-width:720px;margin:0 auto}
+h1{font-size:22px;margin-bottom:4px;color:#1a2a4a}
+.subtitle{color:#8899b0;font-size:13px;margin-bottom:24px}
+h2{font-size:17px;color:#1a2a4a;margin:28px 0 12px;padding-bottom:6px;border-bottom:2px solid #4da6ff}
+h3{font-size:14px;color:#2d4a7a;margin:16px 0 8px}
+.method{display:inline-block;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700;color:#fff;margin-right:6px;vertical-align:2px}
+.method.post{background:#4caf50}
+.method.get{background:#1a73e8}
+.endpoint{font-family:'SF Mono',Consolas,monospace;font-size:13px;color:#0d47a1;word-break:break-all}
+.code{background:#1a2a4a;color:#e8ecf1;padding:14px 16px;border-radius:8px;font-family:'SF Mono',Consolas,monospace;font-size:12px;overflow-x:auto;margin:8px 0;line-height:1.7}
+.code .key{color:#4da6ff}
+.code .str{color:#22c55e}
+.code .num{color:#f59e0b}
+.code .cmt{color:#66788a}
+.note{background:#fff8e1;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0;font-size:13px}
+table{width:100%;border-collapse:collapse;margin:8px 0 16px;font-size:13px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #e8ecf1}
+th{background:#f8fafc;color:#8899b0;font-weight:600;font-size:12px}
+td code{background:#f0f4f8;padding:1px 6px;border-radius:3px;font-size:12px;color:#0d47a1}
+.back{display:inline-block;margin-top:32px;color:#4da6ff;text-decoration:none;font-size:13px;font-weight:600}
+.back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<h1>🎯 阈值号码 API</h1>
+<p class="subtitle">Base URL: <code>https://ct256.cn/number-warehouse/api/threshold</code> &nbsp;|&nbsp; 需 Bearer Token 认证</p>
+
+<h2>1. 计算阈值号码</h2>
+<p><span class="method post">POST</span> <span class="endpoint">/compute</span></p>
+<p>触发阈值计算，从最新抽签日+1天的快照数据中，按 sim_results 值排序取 Top25 / Bottom24。</p>
+
+<h3>请求</h3>
+<table>
+<tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr>
+<tr><td><code>date</code></td><td>string</td><td>否</td><td>目标日期 (YYYY-MM-DD)。不传则自动取最新抽签日+1</td></tr>
+</table>
+
+<div class="code">
+<span class="cmt"># 自动取最新抽签+1</span>
+curl -X POST https://ct256.cn/number-warehouse/api/threshold/compute \
+  -H <span class="str">"Authorization: Bearer &lt;token&gt;"</span>
+
+<span class="cmt"># 指定日期</span>
+curl -X POST <span class="str">"https://ct256.cn/number-warehouse/api/threshold/compute?date=2026-07-14"</span> \
+  -H <span class="str">"Authorization: Bearer &lt;token&gt;"</span>
+</div>
+
+<h3>响应</h3>
+<div class="code">
+{
+  <span class="key">"ok"</span>: <span class="num">true</span>,
+  <span class="key">"date"</span>: <span class="str">"2026-07-14"</span>,
+  <span class="key">"results"</span>: [
+    {<span class="key">"collection_id"</span>: <span class="num">-23</span>, <span class="key">"threshold"</span>: <span class="num">25</span>, <span class="key">"summary_name"</span>: <span class="str">"B级汇总1"</span>, <span class="key">"count"</span>: <span class="num">25</span>},
+    {<span class="key">"collection_id"</span>: <span class="num">14</span>, <span class="key">"threshold"</span>: <span class="num">24</span>, <span class="key">"summary_name"</span>: <span class="str">""</span>, <span class="key">"count"</span>: <span class="num">24</span>}
+  ]
+}
+</div>
+
+<h3>字段说明</h3>
+<table>
+<tr><th>字段</th><th>说明</th></tr>
+<tr><td><code>collection_id</code></td><td>见下方「collection_id 对照表」</td></tr>
+<tr><td><code>threshold</code></td><td>25=Top25 推荐号；24=Bottom24 避开号</td></tr>
+<tr><td><code>summary_name</code></td><td>汇总名（仅汇总级有值）</td></tr>
+<tr><td><code>count</code></td><td>数字个数</td></tr>
+</table>
+
+<h3>collection_id 对照表</h3>
+<table>
+<tr><th>collection_id</th><th>层级</th><th>名称</th><th>说明</th></tr>
+<tr><td><code>-23</code></td><td>汇总级</td><td>B级汇总1</td><td>第1个汇总独立 Top25/Bottom24</td></tr>
+<tr><td><code>-24</code></td><td>汇总级</td><td>B级汇总2</td><td>第2个汇总独立</td></tr>
+<tr><td><code>-25</code></td><td>汇总级</td><td>B级汇总3</td><td>第3个汇总独立</td></tr>
+<tr><td><code>-26</code></td><td>汇总级</td><td>B级汇总4</td><td>第4个汇总独立</td></tr>
+<tr><td><code>-28</code></td><td>汇总级</td><td>B级汇总5</td><td>第5个汇总独立</td></tr>
+<tr><td><code>-29</code></td><td>汇总级</td><td>B级汇总6</td><td>第6个汇总独立</td></tr>
+<tr><td><code>14</code></td><td>集合级</td><td>集合14</td><td>前4汇总聚合 Top25/Bottom24</td></tr>
+<tr><td><code>16</code></td><td>集合级</td><td>集合16</td><td>前6汇总聚合 Top25/Bottom24</td></tr>
+</table>
+
+<div class="note">
+⚠️ <b>注意：</b>请求会先检查 col19 快照是否存在，缺失时自动触发快照采集（含集合14/16），再执行阈值计算。整个过程可能有几秒延迟。
+</div>
+
+<h2>2. 查询阈值结果</h2>
+<p><span class="method get">GET</span> <span class="endpoint">/results</span></p>
+<p>读取已存储的阈值号码，含 col19 汇总明细。</p>
+
+<h3>请求</h3>
+<table>
+<tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr>
+<tr><td><code>date</code></td><td>string</td><td>否</td><td>目标日期。不传则自动取最新数据</td></tr>
+</table>
+
+<div class="code">
+curl -s <span class="str">"https://ct256.cn/number-warehouse/api/threshold/results?date=2026-07-14"</span> \
+  -H <span class="str">"Authorization: Bearer &lt;token&gt;"</span>
+</div>
+
+<h3>响应</h3>
+<div class="code">
+{
+  <span class="key">"date"</span>: <span class="str">"2026-07-14"</span>,
+  <span class="key">"items"</span>: [
+    {
+      <span class="key">"collection_id"</span>: <span class="num">-23</span>,
+      <span class="key">"summary_name"</span>: <span class="str">"B级汇总1"</span>,
+      <span class="key">"label"</span>: <span class="str">"B级汇总1"</span>,
+      <span class="key">"key"</span>: <span class="str">"s23"</span>,
+      <span class="key">"thresholds"</span>: {
+        <span class="str">"25"</span>: {
+          <span class="key">"numbers"</span>: [<span class="num">3</span>,<span class="num">12</span>,<span class="num">25</span>,...],
+          <span class="key">"numbers_str"</span>: <span class="str">"3.12.25.38.7.19.31.44.2.15.27.40.9.21.34.47.5.18.30.42.11.23.36.49"</span>
+        },
+        <span class="str">"24"</span>: {
+          <span class="key">"numbers"</span>: [<span class="num">1</span>,<span class="num">8</span>,<span class="num">14</span>,...],
+          <span class="key">"numbers_str"</span>: <span class="str">"1.8.14.26.39.6.17.29.41.10.22.35.48.4.16.28.37.13.24.32.43.45"</span>
+        }
+      }
+    }
+  ],
+  <span class="key">"col19_summaries"</span>: [
+    {<span class="key">"name"</span>: <span class="str">"B级汇总1"</span>, <span class="key">"total_value"</span>: <span class="num">156000</span>, <span class="key">"draw_number"</span>: <span class="num">12345</span>}
+  ]
+}
+</div>
+
+<h3>字段说明</h3>
+<table>
+<tr><th>字段</th><th>说明</th></tr>
+<tr><td><code>items</code></td><td>阈值条目列表，含汇总级和集合级</td></tr>
+<tr><td><code>thresholds.25</code></td><td>Top25 推荐数字（按 value 降序），numbers_str 为点号分隔字符串</td></tr>
+<tr><td><code>thresholds.24</code></td><td>Bottom24 避开数字</td></tr>
+<tr><td><code>col19_summaries</code></td><td>col19 当天所有汇总的总值+抽签数</td></tr>
+</table>
+
+<h2>3. 认证说明</h2>
+<p>所有 API 请求需携带 Bearer Token：</p>
+<div class="code">
+Authorization: Bearer &lt;your_token&gt;
+</div>
+<p style="margin-top:8px;color:#66788a">Token 通过 <code>POST /auth/login</code> 获取（需密码），有效期 7 天。</p>
+
+<a href="javascript:history.back()" class="back">← 返回</a>
+
+</body>
+</html>
