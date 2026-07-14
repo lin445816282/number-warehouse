@@ -32,6 +32,21 @@ _WHITELIST = {"/auth/login", "/auth/logout", "/favicon.ico", "/api/threshold/res
 
 # ===== 工具函数 =====
 
+def _log_to_admin(ip: str, target: str, success: bool, detail: str = ""):
+    """跨库写管理后台 login_logs 表（stock_agg.db）"""
+    try:
+        import sqlite3 as _sqlite
+        from datetime import datetime as _dt
+        _adb = _sqlite.connect("/home/xiaolin/projects/stock-aggregator/data/stock_agg.db")
+        _adb.execute(
+            "INSERT INTO login_logs (ip, target, success, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            (ip, target, 1 if success else 0, detail, _dt.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        _adb.commit()
+        _adb.close()
+    except Exception:
+        pass
+
 def _generate_token() -> str:
     return hashlib.sha256(secrets.token_bytes(64)).hexdigest()
 
@@ -98,6 +113,8 @@ async def login(request: Request):
     
     if not bcrypt.checkpw(password.encode(), _PASSWORD_HASH):
         _rate_record(ip)
+        # 同步管理后台登录日志（失败）
+        _log_to_admin(ip, "number-warehouse", False, "密码错误")
         raise HTTPException(status_code=401, detail="密码错误")
     
     # 登录成功，清除失败记录
@@ -115,6 +132,9 @@ async def login(request: Request):
         (token, expires, ip, ua)
     )
     db.commit()
+    
+    # 同步管理后台登录日志（成功）
+    _log_to_admin(ip, "number-warehouse", True, "")
     
     response = JSONResponse({"ok": True, "message": "登录成功"})
     response.set_cookie(
