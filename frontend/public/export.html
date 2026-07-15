@@ -184,6 +184,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <script>
 const API = 'api/export';
 const CID = 19;  // 固定A级集合
+
+// session过期检测：返回HTML时自动刷新
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(API + path, opts);
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('text/html')) { window.location.reload(); throw new Error('登录过期'); }
+  return res;
+}
+
 let _summariesData = [];
 let _collName = '';
 let _recordRanks = {};  // {summary_name: [{run_group, value, rank}, ...]}
@@ -192,7 +201,7 @@ let _alertThreshold = 45;  // 默认值，initSettings() 后从服务端加载
 // 加载集合信息 → 动态构建筛选芯片
 async function initCollection() {
   try {
-    const resp = await fetch(API + '/collection-info?collection_id=' + CID);
+    const resp = await apiFetch('/collection-info?collection_id=' + CID);
     const data = await resp.json();
     _collName = data.collection_name;
     document.querySelector('.title').textContent = '📊 ' + _collName;
@@ -224,7 +233,7 @@ function onFilterChange() {
 // 默认取最新快照日期
 async function initDefaultDate() {
   try {
-    const resp = await fetch(API + '/latest-snapshot-date?collection_id=' + CID);
+    const resp = await apiFetch('/latest-snapshot-date?collection_id=' + CID);
     const data = await resp.json();
     return data.date || new Date().toISOString().split('T')[0];
   } catch(e) {
@@ -241,10 +250,10 @@ async function loadData() {
   try {
     // 主集合 19
     const [sumResp, detailResp, gridResp, rankResp] = await Promise.all([
-      fetch(API + '/daily-summary?collection_id=' + CID + '&date=' + date),
-      fetch(API + '/daily-detail?collection_id=' + CID + '&date=' + date),
-      fetch(API + '/grid-detail?collection_id=' + CID + '&date=' + date),
-      fetch(API + '/record-ranks?collection_id=' + CID + '&date=' + date)
+      apiFetch('/daily-summary?collection_id=' + CID + '&date=' + date),
+      apiFetch('/daily-detail?collection_id=' + CID + '&date=' + date),
+      apiFetch('/grid-detail?collection_id=' + CID + '&date=' + date),
+      apiFetch('/record-ranks?collection_id=' + CID + '&date=' + date)
     ]);
     const sumData = await sumResp.json();
     const detailData = await detailResp.json();
@@ -380,7 +389,7 @@ async function collectData() {
   btn.textContent = '⏳ 采集中...';
   const date = document.getElementById('dateInput').value;
   try {
-    const resp = await fetch(API + '/collect-today?date=' + date, { method: 'POST' });
+    const resp = await apiFetch('/collect-today?date=' + date, { method: 'POST' });
     const data = await resp.json();
     const r19 = data.results['19'] || {};
     const r14 = data.results['14'] || {};
@@ -404,7 +413,7 @@ async function syncToStore() {
     const results = [];
     for (const cid of cids) {
       btn.textContent = '⏳ 集合'+cid+'...';
-      const resp = await fetch(API + '/sync-store?collection_id=' + cid + '&date=' + date, { method: 'POST' });
+      const resp = await apiFetch('/sync-store?collection_id=' + cid + '&date=' + date, { method: 'POST' });
       const data = await resp.json();
       results.push(data.ok ? cid+'✓' : cid+'✗');
     }
@@ -421,7 +430,7 @@ document.getElementById('dateInput').addEventListener('change', loadData);
 // ── 定时同步时间编辑 ──
 async function loadCron() {
   try {
-    const resp = await fetch(API + '/sync-cron');
+    const resp = await apiFetch('/sync-cron');
     const data = await resp.json();
     document.getElementById('cronDisplay').textContent = String(data.hour).padStart(2,'0') + ':' + String(data.minute).padStart(2,'0');
     document.getElementById('cronHour').value = data.hour;
@@ -438,7 +447,7 @@ async function saveCron() {
   const hour = parseInt(document.getElementById('cronHour').value) || 0;
   const minute = parseInt(document.getElementById('cronMinute').value) || 0;
   try {
-    const resp = await fetch(API + '/sync-cron', {
+    const resp = await apiFetch('/sync-cron', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({hour: hour, minute: minute})
@@ -538,7 +547,7 @@ async function saveBellSettings() {
   toggleBellSettings();
   // 保存到服务端
   try {
-    await fetch(API + '/settings', {
+    await apiFetch('/settings', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({alert_threshold: _alertThreshold})
@@ -584,7 +593,7 @@ function scrollToFirstAlert() {
 
 async function initSettings() {
   try {
-    const resp = await fetch(API + '/settings');
+    const resp = await apiFetch('/settings');
     const data = await resp.json();
     if (data.alert_threshold) {
       _alertThreshold = parseInt(data.alert_threshold) || 45;
@@ -596,7 +605,7 @@ async function initSettings() {
 var _availDates = [];
 async function loadAvailDates() {
   try {
-    var resp = await fetch(API + '/available-dates?collection_id=' + CID);
+    var resp = await apiFetch('/available-dates?collection_id=' + CID);
     var data = await resp.json();
     _availDates = data.dates || [];
     renderAvailDates();

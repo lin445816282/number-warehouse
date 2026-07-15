@@ -1122,6 +1122,18 @@ import { ref, reactive, computed, watch } from 'vue'
 
 const API = '/number-warehouse/api'
 
+// 全局 fetch 包装：自动处理 session 过期返回 HTML 的情况
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, opts)
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.includes('text/html')) {
+    // session 过期，刷新页面让认证中间件拦截
+    window.location.reload()
+    throw new Error('登录已过期，正在刷新...')
+  }
+  return res
+}
+
 // 自定义确认弹窗（平板兼容）
 const confirmDialog = reactive({
   show: false,
@@ -1928,6 +1940,8 @@ async function runSimulation() {
         ruleIds.push(simProjectRules.value[pid])
       }
     }
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 120000)
     const res = await fetch(`${API}/sim/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1937,7 +1951,9 @@ async function runSimulation() {
         start_date: simStart.value,
         end_date: simEnd.value,
       }),
+      signal: controller.signal,
     })
+    clearTimeout(timeout)
     if (!res.ok) { const err = await res.json(); throw new Error(err.detail) }
     const data = await res.json()
     const runs = data.runs || []
@@ -2588,14 +2604,14 @@ async function onTrL3Change() {
   trL2.value = ''; trL1.value = ''; scopeRunGroups.value = []; trProjectsExpanded.value = false
   if (trL3.value === 'all') { scopeSummaries.value = []; await loadTrAllProjects(); return }
   const cid = parseInt(trL3.value.slice(1))
-  try { const r = await fetch(`${API}/collections/${cid}/summaries`); scopeSummaries.value = await r.json() } catch(e) { scopeSummaries.value = [] }
+  try { const r = await apiFetch(`/collections/${cid}/summaries`); scopeSummaries.value = await r.json() } catch(e) { scopeSummaries.value = [] }
   loadTrScopeProjects()
 }
 async function onTrL2Change() {
   trL1.value = ''; scopeRunGroups.value = []
   if (trL2.value) {
     const sid = parseInt(trL2.value.slice(1))
-    try { const r = await fetch(`${API}/summaries/${sid}/run-groups`); scopeRunGroups.value = await r.json() } catch(e) { scopeRunGroups.value = [] }
+    try { const r = await apiFetch(`/summaries/${sid}/run-groups`); scopeRunGroups.value = await r.json() } catch(e) { scopeRunGroups.value = [] }
   }
   loadTrScopeProjects()
 }
@@ -2604,8 +2620,8 @@ async function onTrL1Change() { loadTrScopeProjects() }
 async function loadTrAllProjects() {
   try {
     const [pRes, rRes] = await Promise.all([
-      fetch(`${API}/projects`),
-      fetch(`${API}/sim/rules`),
+      apiFetch('/projects'),
+      apiFetch('/sim/rules'),
     ])
     const projs = await pRes.json()
     const rules = await rRes.json()
@@ -2629,17 +2645,46 @@ async function loadTrScopeProjects() {
   else if (trL2.value && trL2.value.startsWith('s')) params.set('summary_id', parseInt(trL2.value.slice(1)))
   else if (trL3.value !== 'all') params.set('collection_id', parseInt(trL3.value.slice(1)))
   try {
-    const res = await fetch(`${API}/scope/projects?${params}`)
+    const res = await apiFetch(`/scope/projects?${params}`)
     scopeProjects.value = await res.json()
   } catch (e) { scopeProjects.value = [] }
 }
 
 async function execTodayRun() {
   if (!canTodayRun.value) return
+  todayRunRunning.value = true
+  try {
+  // 预检：今天是否已完成
+  const checkRes = await apiFetch(`/sim/today-ready?date=${todayRunDate.value}`)
+  if (checkRes.ok) {
+    const checkData = await checkRes.json()
+    if (checkData.total > 0) {
+      if (checkData.ready) {
+        // 当天抽签数已出来 → 直接跑，不询问
+        if (checkData.has_draw) {
+          // 直接继续，跳过确认
+        } else {
+          // 抽签数还没出来，询问是否重新演算
+          if (!confirm(`📌 今天已全部演算完成（${checkData.covered}/${checkData.total}）\n\n⚠️ 当天抽签数尚未出来\n\n是否重新演算？`)) {
+            todayRunRunning.value = false
+            return
+          }
+        }
+      } else {
+        // 部分覆盖：提示并确认
+        const missingNames = checkData.missing_list || []
+        const missingText = missingNames.length <= 3 ? missingNames.join('、') : `${missingNames.slice(0, 3).join('、')}等${missingNames.length}条`
+        if (!confirm(`📌 ${checkData.covered}/${checkData.total} 已覆盖，差${checkData.missing}条门店\n\n缺失：${missingText}\n\n是否仍然执行演算？`)) {
+          todayRunRunning.value = false
+          return
+        }
+      }
+    }
+  }
   const pids = scopeProjects.value.map(p => p.project_id)
   const rids = scopeProjects.value.map(p => p.rule_id || 0)
   const total = pids.length
-  const CHUNKS = 3
+  const CHUNKS = 1
   const chunkSize = Math.ceil(total / CHUNKS)
 
   // 关掉表单弹窗，开进度弹窗
@@ -2662,7 +2707,9 @@ async function execTodayRun() {
     })
 
     try {
-      const res = await fetch(`${API}/sim/run`, {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 120000)
+      const res = await apiFetch('/sim/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2672,7 +2719,9 @@ async function execTodayRun() {
           end_date: todayRunDate.value,
           skip_refresh: !isLastChunk  // 最后一批才刷新分析
         }),
+        signal: controller.signal,
       })
+      clearTimeout(timeout)
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || '运行失败')
 
@@ -2708,6 +2757,7 @@ async function execTodayRun() {
   Object.assign(trProgress, { step: CHUNKS, done: total, msg, errors: '' })
   $notify(msg)
   if (allErrors.length) console.warn('演算失败项:', allErrors)
+  } finally { todayRunRunning.value = false }
 }
 
 // ===== 一键清空模拟数据 =====

@@ -1524,6 +1524,38 @@ def list_sim_runs(rule_id: Optional[int] = None, project_id: Optional[int] = Non
     return [dict(r) for r in rows]
 
 
+@app.get("/api/sim/today-ready")
+def check_today_ready(date: str = Query(None)):
+    """检查指定日期是否所有项目都已演算完成"""
+    db = get_db()
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    # 统计：活跃规则数 vs 已覆盖到该日期的 sim_runs 数
+    total = db.execute("SELECT COUNT(*) FROM sim_rules WHERE is_active=1").fetchone()[0]
+    covered = db.execute(
+        "SELECT COUNT(*) FROM sim_runs WHERE end_date >= ?", (date,)
+    ).fetchone()[0]
+    missing = total - covered
+    # 缺失门店列表（项目名）
+    missing_list = []
+    if missing > 0:
+        rows = db.execute("""
+            SELECT DISTINCT p.name FROM sim_rules r
+            JOIN projects p ON r.project_id = p.id
+            WHERE r.is_active = 1
+              AND r.id NOT IN (
+                SELECT DISTINCT rule_id FROM sim_runs WHERE end_date >= ?
+              )
+        """, (date,)).fetchall()
+        missing_list = [row[0] for row in rows]
+    # 检查当天抽签数是否已出来
+    has_draw = db.execute(
+        "SELECT COUNT(*) FROM records WHERE date = ?", (date,)
+    ).fetchone()[0] > 0
+    db.close()
+    return {"date": date, "total": total, "covered": covered, "missing": missing, "ready": missing == 0, "missing_list": missing_list, "has_draw": has_draw}
+
+
 @app.get("/api/sim/runs/{run_id}")
 def get_sim_run(run_id: int, limit: Optional[int] = Query(None)):
     db = get_db()
