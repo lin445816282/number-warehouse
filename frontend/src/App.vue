@@ -23,6 +23,7 @@
       <div class="rec-header">
         <span class="rec-title">📋 记录</span>
         <div style="display:flex;gap:6px">
+          <button class="rec-btn-analysis" @click="openAnalysis()">📊 分析</button>
           <select v-model="recYear" @change="loadRecords()" class="form-input" style="width:auto;padding:6px 10px;font-size:12px">
             <option value="">全部年份</option>
             <option v-for="y in recYears" :key="y" :value="y">{{ y }}</option>
@@ -58,13 +59,11 @@
           <div class="form-fields">
             <label>日期</label>
             <div class="date-picker-field" @click="openDatePicker(form.date, v => form.date = v, $event)">
-              {{ form.date || '点击选择日期' }}
-              <span class="date-arrow">📅</span>
+              <input v-model="form.date" readonly class="form-input" style="cursor:pointer">
             </div>
-            <label>日期序号 <span class="form-hint">(自动)</span></label>
-            <input type="number" :value="computedDaySeq" class="form-input" disabled />
-            <label>抽签数 (1-49)</label>
-            <input type="number" v-model.number="form.draw_number" min="1" max="49" class="form-input" placeholder="1-49" />
+            <label style="margin-top:8px">抽签数字 (1-49)</label>
+            <input v-model.number="form.draw_number" type="number" min="1" max="49" class="form-input">
+            <div class="form-hint">第 {{ computedDaySeq }} 天</div>
           </div>
           <div class="form-btns">
             <button class="btn-cancel" @click="showForm=false">取消</button>
@@ -72,6 +71,89 @@
           </div>
         </div>
       </div>
+
+      <!-- 尾数分析弹窗 -->
+      <div v-if="showAnalysis" class="form-overlay" @click.self="showAnalysis=false">
+        <div class="form-card" style="max-width:720px;max-height:85vh;overflow-y:auto">
+          <div class="form-title">📊 尾数走势分析</div>
+          <div v-if="analysisLoading" style="text-align:center;padding:20px">⏳ 分析中...</div>
+          <div v-else-if="analysisData.error" style="color:#dc2626;padding:16px">{{ analysisData.error }}</div>
+          <div v-else>
+            <!-- 统计摘要 -->
+            <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:140px;background:#f0fdf4;border-radius:10px;padding:10px;text-align:center">
+                <div style="font-size:11px;color:#16a34a">0-4 尾数</div>
+                <div style="font-size:20px;font-weight:700;color:#16a34a">{{ analysisData.stats.counts.total_04 }}次</div>
+                <div style="font-size:10px;color:#64748b">连续 {{ analysisData.stats.current.streak_04 }} 天</div>
+              </div>
+              <div style="flex:1;min-width:140px;background:#fef2f2;border-radius:10px;padding:10px;text-align:center">
+                <div style="font-size:11px;color:#dc2626">5-9 尾数</div>
+                <div style="font-size:20px;font-weight:700;color:#dc2626">{{ analysisData.stats.counts.total_59 }}次</div>
+                <div style="font-size:10px;color:#64748b">连续 {{ analysisData.stats.current.streak_59 }} 天</div>
+              </div>
+              <div style="flex:1;min-width:200px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border-radius:10px;padding:10px;text-align:center">
+                <div style="font-size:11px;color:#2563eb">📡 下期预测</div>
+                <div style="font-size:18px;font-weight:700;color:#1e40af">{{ analysisData.prediction.range }}</div>
+                <div style="font-size:10px;color:#3b82f6;margin-top:2px">{{ analysisData.prediction.hint }}</div>
+                <div v-if="analysisNextDate" style="font-size:10px;color:#1d4ed8;margin-top:4px;font-weight:600">📅 {{ analysisNextDate }}</div>
+              </div>
+            </div>
+            <!-- 连击记录卡片（按长度分组 Top10） -->
+            <div v-if="analysisStreaks" class="tail-cards" style="margin-top:8px">
+              <div class="tail-card tail-04">
+                <div class="tail-card-hd">
+                  <span class="tail-card-badge bg-green">0-4</span>
+                  <span v-if="analysisStreaks.current && analysisStreaks.current['0-4'].streak>0" class="tail-card-streak">当前连续 <b>{{ analysisStreaks.current['0-4'].streak }}</b> 天</span>
+                </div>
+                <div class="tail-card-list">
+                  <div v-for="(g,i) in (analysisStreaks.by_len_04||[])" :key="'a04-'+i" class="tail-streak-row">
+                    <span class="tail-streak-num">{{ i+1 }}</span>
+                    <span class="tail-streak-len">{{ g.len }}天</span>
+                    <span class="tail-streak-count" @click.stop="showAnalysisPeriods('04',g)">{{ g.count }}次</span>
+                  </div>
+                </div>
+              </div>
+              <div class="tail-card tail-59">
+                <div class="tail-card-hd">
+                  <span class="tail-card-badge bg-red">5-9</span>
+                  <span v-if="analysisStreaks.current && analysisStreaks.current['5-9'].streak>0" class="tail-card-streak">当前连续 <b>{{ analysisStreaks.current['5-9'].streak }}</b> 天</span>
+                </div>
+                <div class="tail-card-list">
+                  <div v-for="(g,i) in (analysisStreaks.by_len_59||[])" :key="'a59-'+i" class="tail-streak-row">
+                    <span class="tail-streak-num">{{ i+1 }}</span>
+                    <span class="tail-streak-len">{{ g.len }}天</span>
+                    <span class="tail-streak-count" @click.stop="showAnalysisPeriods('59',g)">{{ g.count }}次</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- 时间段详情（弹窗内嵌弹窗） -->
+          <div v-if="analysisPeriods" class="form-overlay" @click.self="analysisPeriods=null" style="position:fixed;top:0;left:0;z-index:2000">
+            <div class="form-card" style="max-width:380px;margin:10vh auto">
+              <div class="form-title">{{ analysisPeriods.label }} 连击 {{ analysisPeriods.len }}天 × {{ analysisPeriods.count }}次</div>
+              <div style="max-height:50vh;overflow-y:auto">
+                <div v-for="(p,i) in analysisPeriods.periods" :key="i"
+                     style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #1e293b;gap:10px">
+                  <span style="background:#334155;color:#ffd700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0">{{ i+1 }}</span>
+                  <span style="flex:1;font-size:13px;color:#e2e8f0">
+                    <span style="color:#64748b">{{ p.start }}</span>
+                    <span style="margin:0 6px">→</span>
+                    <span style="color:#64748b">{{ p.end }}</span>
+                  </span>
+                </div>
+              </div>
+              <div class="form-btns" style="margin-top:12px">
+                <button class="btn-cancel" @click="analysisPeriods=null">关闭</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-btns" style="margin-top:12px">
+            <button class="btn-cancel" @click="showAnalysis=false">关闭</button>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- 组别设置视图 -->
@@ -1127,8 +1209,8 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(`${API}${path}`, opts)
   const contentType = res.headers.get('content-type') || ''
   if (contentType.includes('text/html')) {
-    // session 过期，刷新页面让认证中间件拦截
-    window.location.reload()
+    // session 过期，跳转到首页让认证中间件显示登录页
+    window.location.href = '/number-warehouse/'
     throw new Error('登录已过期，正在刷新...')
   }
   return res
@@ -1168,6 +1250,33 @@ function doLogout() {
 }
 
 const view = ref('collection')
+
+// ===== 尾数记录分析 =====
+const tailData = reactive({
+  latest_date: '', latest_draw: null,
+  current: { '0-4': {streak:0}, '5-9': {streak:0} },
+  by_len_04: [], by_len_59: [],
+  prediction: null,
+})
+const tailPeriods = ref(null)
+
+function showTailPeriods(group, g) {
+  tailPeriods.value = {
+    label: group === '04' ? '🟢 0-4' : '🔴 5-9',
+    len: g.len,
+    count: g.count,
+    periods: g.periods,
+  }
+}
+
+async function loadTailStreaks() {
+  try {
+    const r = await apiFetch('/draw-analysis/streaks')
+    const data = await r.json()
+    if (data.error) { $notify(data.error, true); return }
+    Object.assign(tailData, data)
+  } catch(e) { $notify('加载失败', true) }
+}
 
 // ===== 导出页签 =====
 const exportSrc = ref('')
@@ -1324,6 +1433,52 @@ async function doDelete(id) {
     await fetch(`${API}/records/${id}`, { method: 'DELETE' })
     loadRecords()
   } catch (e) { console.error(e) }
+}
+
+// ===== 尾数分析 =====
+const showAnalysis = ref(false)
+const analysisLoading = ref(false)
+const analysisData = ref({})
+const analysisTable = ref([])
+const analysisNextDate = ref('')
+const analysisStreaks = ref(null)
+
+function showAnalysisPeriods(group, g) {
+  const periods = (g.periods || []).map(p => ({
+    start: p.start_date || p.start,
+    end: p.end_date || p.end,
+  }))
+  analysisPeriods.value = {
+    label: group === '04' ? '🟢 0-4' : '🔴 5-9',
+    len: g.len, count: g.count,
+    periods: periods.reverse(),
+  }
+}
+const analysisPeriods = ref(null)
+
+async function openAnalysis() {
+  showAnalysis.value = true; analysisLoading.value = true; analysisData.value = {}
+  analysisStreaks.value = null; analysisNextDate.value = ''
+  try {
+    const params = recYear.value ? `?year=${recYear.value}` : ''
+    const [res1, res2] = await Promise.all([
+      fetch(`${API}/tail-analysis${params}`),
+      apiFetch('/draw-analysis/streaks'),
+    ])
+    analysisData.value = await res1.json()
+    analysisTable.value = analysisData.value.table || []
+    // compute next date
+    const ld = analysisData.value.latest_date
+    if (ld) {
+      const d = new Date(ld)
+      d.setDate(d.getDate() + 1)
+      analysisNextDate.value = d.toISOString().slice(0, 10)
+    }
+    // streaks
+    const sdata = await res2.json()
+    if (!sdata.error) analysisStreaks.value = sdata
+  } catch (e) { analysisData.value = { error: e.message } }
+  finally { analysisLoading.value = false }
 }
 
 // ===== 组别设置 =====
@@ -2984,6 +3139,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
   padding: 8px 18px; background: linear-gradient(135deg, #4da6ff, #1a2a4a);
   color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
 }
+.rec-btn-analysis {
+  padding: 6px 12px; background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: #fff; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
+  white-space: nowrap;
+}
+.rec-btn-analysis:active { transform: scale(.95); }
 .rec-empty { text-align: center; padding: 40px 0; color: #bbb; font-size: 14px; }
 .rec-list { display: flex; flex-direction: column; gap: 6px; }
 .rec-row {
@@ -3422,4 +3583,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .th-num { width: 32px; height: 32px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
 .th-num.hit { background: #4da6ff; color: #fff; }
 .th-num.miss { background: #e8ecf1; color: #8899b0; }
+
+/* ===== 尾数记录分析 ===== */
+.tail-view { padding: 0 12px 40px; }
+.tail-latest { display: flex; align-items: center; justify-content: center; padding: 14px; margin-bottom: 10px; }
+.tail-predict { padding: 14px; margin-bottom: 10px; }
+.tail-cards { display: flex; gap: 10px; margin-bottom: 10px; }
+.tail-card { flex: 1; background: rgba(255,255,255,0.04); border-radius: 14px; padding: 12px; cursor: pointer; transition: all .15s; border: 1px solid rgba(255,255,255,0.06); }
+.tail-card:active { background: rgba(255,255,255,0.08); transform: scale(.98); }
+.tail-card-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.tail-card-badge { padding: 2px 10px; border-radius: 10px; font-size: 13px; font-weight: 700; color: #fff; }
+.bg-green { background: #16a34a; }
+.bg-red { background: #dc2626; }
+.tail-card-streak { font-size: 11px; color: #94a3b8; }
+.tail-card-list { display: flex; flex-direction: column; gap: 6px; }
+.tail-streak-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.tail-streak-num { background: rgba(255,255,255,0.08); color: #94a3b8; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-weight: 600; }
+.tail-streak-dates { flex: 1; color: #64748b; }
+.tail-streak-len { color: #fbbf24; font-weight: 700; flex-shrink: 0; margin-right: 4px; }
+.tail-streak-count { color: #38bdf8; font-weight: 700; cursor: pointer; flex-shrink: 0; padding: 2px 8px; background: rgba(56,189,248,0.12); border-radius: 10px; font-size: 11px; }
+.tail-streak-count:hover { background: rgba(56,189,248,0.25); }
 </style>

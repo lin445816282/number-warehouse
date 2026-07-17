@@ -550,6 +550,231 @@ def list_records(page: int = 1, page_size: int = 30, year: str = ""):
     }
 
 
+@app.get("/api/draw-analysis")
+def draw_analysis(year: str = ""):
+    """
+    抽签尾数分析：0-4 / 5-9 连续走势 + 下期预测
+    尾数 = draw_number % 10（49→9, 40→0 以此类推）
+    """
+    db = get_db()
+    if year and year.isdigit():
+        where = "WHERE date >= ? AND date < ? AND draw_number IS NOT NULL AND draw_number > 0"
+        params = [f"{year}-01-01", f"{int(year)+1}-01-01"]
+    else:
+        where = "WHERE draw_number IS NOT NULL AND draw_number > 0"
+        params = []
+    rows = db.execute(
+        f"SELECT date, day_seq, draw_number FROM records {where} ORDER BY date",
+        params
+    ).fetchall()
+    db.close()
+
+    if not rows:
+        return {"error": "无数据", "table": [], "stats": {}, "prediction": {}}
+
+    # ── 尾数分析 ──
+    table = []
+    streak_04 = 0
+    streak_59 = 0
+    max_04 = 0
+    max_59 = 0
+    max_04_date = ""
+    max_59_date = ""
+
+    for r in rows:
+        draw = r["draw_number"]
+        tail = draw % 10
+        is_04 = 1 if tail <= 4 else 0
+
+        if is_04:
+            streak_04 += 1
+            streak_59 = 0
+        else:
+            streak_59 += 1
+            streak_04 = 0
+
+        if streak_04 > max_04:
+            max_04 = streak_04
+            max_04_date = r["date"]
+        if streak_59 > max_59:
+            max_59 = streak_59
+            max_59_date = r["date"]
+
+        table.append({
+            "date": r["date"],
+            "day_seq": r["day_seq"],
+            "draw": draw,
+            "tail": tail,
+            "range": "0-4" if is_04 else "5-9",
+            "streak_04": streak_04,
+            "streak_59": streak_59,
+        })
+
+    stats = {
+        "current": {"streak_04": streak_04, "streak_59": streak_59},
+        "max": {
+            "streak_04": max_04, "streak_04_date": max_04_date,
+            "streak_59": max_59, "streak_59_date": max_59_date,
+        },
+        "counts": {
+            "total_04": sum(1 for r in rows if r["draw_number"] % 10 <= 4),
+            "total_59": sum(1 for r in rows if r["draw_number"] % 10 >= 5),
+            "total": len(rows),
+        },
+    }
+
+    # ── 预测 ──
+    recent = table[-15:]
+    last_30 = table[-30:] if len(table) >= 30 else table
+    freq_04 = sum(1 for t in last_30 if t["range"] == "0-4")
+    freq_59 = len(last_30) - freq_04
+
+    if streak_59 >= 4:
+        hint = "5-9 已连续 {} 天，历史最长 {} 天，0-4 回归概率高".format(streak_59, max_59)
+        predict_range = "0-4"
+    elif streak_04 >= 4:
+        hint = "0-4 已连续 {} 天，历史最长 {} 天，5-9 回归概率高".format(streak_04, max_04)
+        predict_range = "5-9"
+    elif streak_59 >= 2:
+        hint = "5-9 连续 {} 天，关注延续".format(streak_59)
+        predict_range = "5-9" if freq_59 > freq_04 else "0-4"
+    elif streak_04 >= 2:
+        hint = "0-4 连续 {} 天，关注延续".format(streak_04)
+        predict_range = "0-4" if freq_04 > freq_59 else "5-9"
+    else:
+        if freq_04 > freq_59:
+            predict_range = "0-4"
+            hint = "近期 0-4 占优 ({}/{})，顺势看 0-4".format(freq_04, len(last_30))
+        else:
+            predict_range = "5-9"
+            hint = "近期 5-9 占优 ({}/{})，顺势看 5-9".format(freq_59, len(last_30))
+
+    prediction = {
+        "range": predict_range,
+        "hint": hint,
+        "recent_30": {"0-4": freq_04, "5-9": freq_59},
+        "tail_numbers": {"0-4": list(range(0, 5)), "5-9": list(range(5, 10))},
+    }
+
+    return {"table": table, "stats": stats, "prediction": prediction}
+
+
+@app.get("/api/draw-analysis/streaks")
+def draw_analysis_streaks():
+    """尾数 0-4/5-9 连击分析：按长度分组 Top10 + 时间段"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT date, day_seq, draw_number FROM records WHERE draw_number IS NOT NULL AND draw_number > 0 ORDER BY date"
+    ).fetchall()
+    db.close()
+
+    if not rows:
+        return {"error": "无数据"}
+
+    # ── 尾数计算：收集所有连击段 ──
+    all_streaks = []
+    current_range = None
+    current_start = None
+    prev_date = None
+    streak_len = 0
+
+    for r in rows:
+        draw = r["draw_number"]
+        tail = draw % 10
+        rg = "0-4" if tail <= 4 else "5-9"
+
+        if rg == current_range:
+            streak_len += 1
+            prev_date = r["date"]
+        else:
+            if current_range and streak_len >= 1:
+                all_streaks.append({
+                    "range": current_range,
+                    "start_date": current_start,
+                    "end_date": prev_date,
+                    "length": streak_len,
+                })
+            current_range = rg
+            current_start = r["date"]
+            prev_date = r["date"]
+            streak_len = 1
+
+    # 最后一段 → 标记为当前
+    if current_range and streak_len >= 1:
+        all_streaks.append({
+            "range": current_range,
+            "start_date": current_start,
+            "end_date": rows[-1]["date"],
+            "length": streak_len,
+            "is_current": True,
+        })
+
+    def group_by_length(streaks_list):
+        """按长度分组: {len: [{start, end}, ...]} → [{len, count, periods}]"""
+        grouped = {}
+        for s in streaks_list:
+            ln = s["length"]
+            if ln not in grouped:
+                grouped[ln] = []
+            grouped[ln].append({"start": s["start_date"], "end": s["end_date"]})
+        # 按长度降序
+        result = []
+        for ln in sorted(grouped.keys(), reverse=True):
+            result.append({"len": ln, "count": len(grouped[ln]), "periods": grouped[ln]})
+        return result
+
+    streaks_04 = [s for s in all_streaks if s["range"] == "0-4"]
+    streaks_59 = [s for s in all_streaks if s["range"] == "5-9"]
+
+    by_len_04 = group_by_length(streaks_04)[:10]
+    by_len_59 = group_by_length(streaks_59)[:10]
+
+    # ── 当前连击 ──
+    cur_04 = next((s for s in all_streaks if s.get("is_current") and s["range"]=="0-4"), None)
+    cur_59 = next((s for s in all_streaks if s.get("is_current") and s["range"]=="5-9"), None)
+    cur_04_len = cur_04["length"] if cur_04 else 0
+    cur_59_len = cur_59["length"] if cur_59 else 0
+
+    # ── 预测 ──
+    recent_30 = rows[-30:] if len(rows) >= 30 else rows
+    freq_04 = sum(1 for r in recent_30 if r["draw_number"] % 10 <= 4)
+    freq_59 = len(recent_30) - freq_04
+
+    if cur_59_len >= 4:
+        max_59 = by_len_59[0]["len"] if by_len_59 else 0
+        hint = "5-9 已连续 {} 天（史高 {} 天），0-4 回归概率高".format(cur_59_len, max_59)
+        predict_range = "0-4"
+    elif cur_04_len >= 4:
+        max_04 = by_len_04[0]["len"] if by_len_04 else 0
+        hint = "0-4 已连续 {} 天（史高 {} 天），5-9 回归概率高".format(cur_04_len, max_04)
+        predict_range = "5-9"
+    elif cur_59_len >= 2:
+        hint = "5-9 连续 {} 天，关注延续".format(cur_59_len)
+        predict_range = "5-9" if freq_59 > freq_04 else "0-4"
+    elif cur_04_len >= 2:
+        hint = "0-4 连续 {} 天，关注延续".format(cur_04_len)
+        predict_range = "0-4" if freq_04 > freq_59 else "5-9"
+    else:
+        if freq_04 > freq_59:
+            predict_range = "0-4"
+            hint = "近期 0-4 占优 ({}/{})，顺势看 0-4".format(freq_04, len(recent_30))
+        else:
+            predict_range = "5-9"
+            hint = "近期 5-9 占优 ({}/{})，顺势看 5-9".format(freq_59, len(recent_30))
+
+    return {
+        "current": {
+            "0-4": {"streak": cur_04_len, "start": cur_04["start_date"] if cur_04 else None},
+            "5-9": {"streak": cur_59_len, "start": cur_59["start_date"] if cur_59 else None},
+        },
+        "by_len_04": by_len_04,
+        "by_len_59": by_len_59,
+        "prediction": {"range": predict_range, "hint": hint, "recent_30": {"0-4": freq_04, "5-9": freq_59}},
+        "latest_date": rows[-1]["date"] if rows else None,
+        "latest_draw": rows[-1]["draw_number"] if rows else None,
+    }
+
+
 @app.post("/api/records")
 def create_record(r: RecordIn):
     target = dt_date.fromisoformat(r.date)
@@ -4390,6 +4615,155 @@ class StripPrefixMiddleware:
         if scope["type"] in ("http", "websocket") and scope["path"].startswith(self.prefix):
             scope["path"] = scope["path"][len(self.prefix):] or "/"
         await self.app(scope, receive, send)
+
+# ═══════════════ 尾数走势分析 ═══════════════
+@app.get("/api/tail-analysis")
+def get_tail_analysis(year: str = None):
+    """分析抽签记录尾数走势：0-4尾 vs 5-9尾 连续天数 + 预测"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    if year:
+        rows = db.execute(
+            "SELECT date, draw_number FROM records WHERE date LIKE ? ORDER BY date",
+            (f"{year}%",)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT date, draw_number FROM records ORDER BY date"
+        ).fetchall()
+    db.close()
+
+    if not rows:
+        return {"error": "无抽签记录"}
+
+    # 逐日构建尾数走势
+    daily = []
+    for r in rows:
+        tail = r["draw_number"] % 10
+        rng = "0-4" if tail <= 4 else "5-9"
+        daily.append({
+            "date": r["date"],
+            "draw": r["draw_number"],
+            "tail": tail,
+            "group": rng
+        })
+
+    # 计算各组的连续段列表
+    def calc_streaks(data, target_group):
+        all_streaks = []
+        current = 0
+        for d in data:
+            if d["group"] == target_group:
+                current += 1
+            else:
+                if current > 0:
+                    all_streaks.append(current)
+                current = 0
+        if current > 0:
+            all_streaks.append(current)
+        return all_streaks
+
+    low_streaks = calc_streaks(daily, "0-4")
+    high_streaks = calc_streaks(daily, "5-9")
+
+    # 当前连续
+    low_current = 0
+    for d in reversed(daily):
+        if d["group"] == "0-4":
+            low_current += 1
+        else:
+            break
+
+    high_current = 0
+    for d in reversed(daily):
+        if d["group"] == "5-9":
+            high_current += 1
+        else:
+            break
+
+    # 历史最长（找对应日期）
+    low_longest = max(low_streaks) if low_streaks else 0
+    high_longest = max(high_streaks) if high_streaks else 0
+
+    # 找最长连续段对应日期
+    def find_max_streak_date(data, target, longest):
+        current = 0; start_date = ""
+        for d in data:
+            if d["group"] == target:
+                if current == 0: start_date = d["date"]
+                current += 1
+                if current == longest:
+                    return f"{start_date}~{d['date']}" if start_date != d["date"] else d["date"]
+            else:
+                current = 0
+        return ""
+
+    # 总次数
+    total_low = sum(1 for d in daily if d["group"] == "0-4")
+    total_high = sum(1 for d in daily if d["group"] == "5-9")
+
+    # 预测
+    def predict(name, current, longest):
+        if current == 0:
+            return {"range": f"📡 {name}", "hint": f"当前{name}尾未连续，下期{name}尾概率高"}
+        ratio = current / longest if longest > 0 else 1
+        if ratio >= 0.8:
+            return {"range": f"⚠️ {name}", "hint": f"{name}尾已连续{current}天(最长{longest}天)，反转概率高"}
+        elif ratio >= 0.5:
+            return {"range": f"📈 {name}", "hint": f"{name}尾连续{current}天(最长{longest}天)，仍可能延续"}
+        else:
+            return {"range": f"✅ {name}", "hint": f"{name}尾连续{current}天(最长{longest}天)，继续看好{name}尾"}
+
+    # 根据当前连续状态选择主预测
+    if high_current > low_current:
+        prediction = predict("5-9", high_current, high_longest)
+    else:
+        prediction = predict("0-4", low_current, low_longest)
+
+    # 最近30天表格（O(n)计算连续，然后倒序→新在上）
+    recent = daily[-30:] if len(daily) > 30 else daily
+    table_raw = []
+    s04 = 0; s59 = 0
+    for d in recent:
+        if d["group"] == "0-4":
+            s04 += 1; s59 = 0
+        else:
+            s59 += 1; s04 = 0
+        # 日期格式化：7月16日
+        parts = d["date"].split("-")
+        date_fmt = f"{int(parts[1])}月{int(parts[2])}日"
+        table_raw.append({
+            "date": date_fmt,
+            "draw": d["draw"],
+            "tail": d["tail"],
+            "range": d["group"],
+            "streak_04": s04,
+            "streak_59": s59
+        })
+    table = list(reversed(table_raw))
+
+    return {
+        "stats": {
+            "counts": {
+                "total_04": total_low,
+                "total_59": total_high
+            },
+            "current": {
+                "streak_04": low_current,
+                "streak_59": high_current
+            },
+            "max": {
+                "streak_04": low_longest,
+                "streak_04_date": find_max_streak_date(daily, "0-4", low_longest),
+                "streak_59": high_longest,
+                "streak_59_date": find_max_streak_date(daily, "5-9", high_longest)
+            }
+        },
+        "prediction": prediction,
+        "table": table,
+        "latest_date": daily[-1]["date"] if daily else None,
+    }
+
 
 # 认证中间件（在 StripPrefix 之前添加，使其在外层先剥离前缀）
 app.include_router(auth_router)

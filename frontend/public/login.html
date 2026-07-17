@@ -93,8 +93,8 @@ body{
     }).then(function(r){
       return r.json().then(function(d){
         if(!r.ok)throw new Error(d.detail||'登录失败');
-        // 登录成功 → 跳转首页
-        window.location.href='./';
+        // 登录成功 → 跳转首页（绝对路径，避免相对路径错误）
+        window.location.href = '/number-warehouse/';
       }).catch(function(e2){
         if(e2 instanceof SyntaxError)throw new Error('服务器错误');
         throw e2;
