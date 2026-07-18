@@ -793,6 +793,14 @@ def create_record(r: RecordIn):
     db.commit()
     row = db.execute("SELECT * FROM records WHERE rowid=last_insert_rowid()").fetchone()
     db.close()
+    # 主动推送到门店资金看板
+    try:
+        import requests
+        requests.post("http://127.0.0.1:8009/api/draw-records",
+                       json={"date": r.date, "day_seq": day_seq, "draw_number": r.draw_number},
+                       timeout=3)
+    except:
+        pass
     return {"ok": True, "record": dict(row)}
 
 
