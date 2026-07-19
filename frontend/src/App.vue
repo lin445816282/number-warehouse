@@ -406,8 +406,19 @@
       </div>
       <!-- 日期选择 -->
       <div class="th-date-row">
-        <input type="date" v-model="thDate" @change="loadThreshold" class="th-date-input" />
-        <span v-if="thCol19?.length" class="th-draw">🎲 {{ thCol19[0].draw_number || '—' }}</span>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:#8899b0;cursor:pointer;white-space:nowrap">
+          <input type="checkbox" v-model="thRange" style="width:14px;height:14px" />
+          时间段
+        </label>
+        <template v-if="!thRange">
+          <input type="date" v-model="thDate" @change="loadThreshold" class="th-date-input" />
+        </template>
+        <template v-else>
+          <input type="date" v-model="thFromDate" class="th-date-input" style="flex:1;min-width:0" />
+          <span style="color:#8899b0;font-size:12px">→</span>
+          <input type="date" v-model="thToDate" class="th-date-input" style="flex:1;min-width:0" />
+        </template>
+        <span v-if="thCol19?.length && !thRange" class="th-draw">🎲 {{ thCol19[0].draw_number || '—' }}</span>
       </div>
       <div v-if="thMsg" class="th-msg" :class="thMsgType">{{ thMsg }}</div>
       <!-- col19 汇总明细 -->
@@ -1294,6 +1305,9 @@ const thMsg = ref('')
 const thMsgType = ref('')
 const thDate = ref('')  // 由后端自动确定（最新抽签+1）
 const thCol19 = ref([])
+const thRange = ref(false)  // 时间段模式
+const thFromDate = ref('')
+const thToDate = ref('')
 
 function fmtW(v) { return v != null ? (v / 10000).toFixed(1) + '万' : '—' }
 
@@ -1329,13 +1343,31 @@ async function computeThreshold() {
   thMsg.value = '计算中...'
   thMsgType.value = ''
   try {
-    const q = thDate.value ? '?date=' + thDate.value : ''
+    let q = ''
+    if (thRange.value && thFromDate.value && thToDate.value) {
+      q = '?from_date=' + thFromDate.value + '&to_date=' + thToDate.value
+    } else if (thDate.value) {
+      q = '?date=' + thDate.value
+    }
     const r = await fetch('api/threshold/compute' + q, { method: 'POST', credentials: 'include' })
     const d = await r.json()
     if (d.ok) {
-      thMsg.value = '✅ 计算完成'
-      thMsgType.value = 'ok'
-      thDate.value = d.date
+      if (d.mode === 'range') {
+        thMsg.value = '✅ ' + d.dates_count + '天完成 (' + d.elapsed_sec + 's)'
+        thMsgType.value = 'ok'
+        if (d.errors?.length) {
+          thMsg.value += ' | ⚠️ ' + d.errors.length + '错'
+        }
+        if (d.dates?.length) {
+          thDate.value = d.dates[d.dates.length - 1]
+          thFromDate.value = d.from
+          thToDate.value = d.to
+        }
+      } else {
+        thMsg.value = '✅ 计算完成'
+        thMsgType.value = 'ok'
+        thDate.value = d.date
+      }
       await loadThreshold()
     } else {
       thMsg.value = '❌ ' + (d.error || '计算失败')

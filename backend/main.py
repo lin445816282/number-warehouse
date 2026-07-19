@@ -4411,51 +4411,14 @@ init_auth_db()
 # 静态文件
 # ==================== 集合 阈值号码 复制25/24 ====================
 
-@app.post("/api/threshold/compute")
-def compute_threshold_numbers(date: str = None):
-    """计算 汇总级复制25/24（每个汇总独立）+ 集合级（14=前4聚合, 16=前6聚合）
-    自动推进到最新抽签+1天；缺失快照时自动生成。
+def _compute_threshold_one_date(use_date, db=None):
+    """单日期阀值计算核心逻辑。返回 {ok, date, results, error}。
+    db已打开(传入)或内部打开。
     """
-    db = get_db()
-    from datetime import date as dt, timedelta
-
-    # 确定目标日期：最新抽签日 + 1天
-    rec = db.execute(
-        "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
-    ).fetchone()
-    max_draw = rec["dt"] if rec and rec["dt"] else None
-
-    if date:
-        use_date = date
-    elif max_draw:
-        use_date = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat()
-    else:
-        use_date = dt.today().isoformat()
-
-    # 安全检查：只允许到 max_draw+1，且不超过今天+1
-    max_allowed = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat() if max_draw else dt.today().isoformat()
-    if use_date > max(max_allowed, dt.today().isoformat()):
-        db.close()
-        return {"ok": False, "error": f"日期 {use_date} 超过允许范围（最新抽签{max_draw}+1={max_allowed}）"}
-
-    # 检查并自动生成 col19 快照
-    col19_cnt = db.execute(
-        "SELECT COUNT(*) FROM daily_snapshots WHERE date=? AND collection_id=19", (use_date,)
-    ).fetchone()[0]
-    if col19_cnt == 0:
-        db.close()
-        # 先采集 col19
-        r19 = save_daily_snapshot(19, use_date)
-        if not r19.get("ok"):
-            return {"ok": False, "error": f"col19 快照生成失败: {r19.get('error', r19.get('message', '未知'))}"}
-        # 重新打开数据库
+    close_db = db is None
+    if db is None:
         db = get_db()
-        # 继续采集 14 和 16
-        db.close()
-        save_daily_snapshot(14, use_date)
-        save_daily_snapshot(16, use_date)
-        db = get_db()
-
+    
     cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
 
     # 取 col19 前6个汇总
@@ -4464,12 +4427,13 @@ def compute_threshold_numbers(date: str = None):
         (use_date,)
     ).fetchall()
     if not src_rows:
-        db.close()
-        return {"ok": False, "error": "col19 无快照数据"}
+        if close_db:
+            db.close()
+        return {"ok": False, "error": "col19 无快照数据", "date": use_date}
 
     src_list = [(r["summary_id"], r["summary_name"]) for r in src_rows]
 
-    def build_grid(sids, db, use_date, cv_map):
+    def build_grid(sids):
         """汇总 sid 列表的 sim_results 聚合为1-49格"""
         pids = [r[0] for r in db.execute(
             f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi "
@@ -4499,11 +4463,10 @@ def compute_threshold_numbers(date: str = None):
         return all_nums[:25], all_nums[25:]
 
     results = []
-
     # --- 汇总级：每个汇总独立（cid = -summary_id）---
     sids_all = [sid for sid, _ in src_list]
     for sid, sname in src_list:
-        top25, bottom24 = build_grid([sid], db, use_date, cv_map)
+        top25, bottom24 = build_grid([sid])
         if top25 is None:
             continue
         for threshold, nums in [(25, top25), (24, bottom24)]:
@@ -4514,7 +4477,7 @@ def compute_threshold_numbers(date: str = None):
 
     # --- 集合14：前4汇总聚合 ---
     if len(sids_all) >= 4:
-        top25, bottom24 = build_grid(sids_all[:4], db, use_date, cv_map)
+        top25, bottom24 = build_grid(sids_all[:4])
         if top25:
             for threshold, nums in [(25, top25), (24, bottom24)]:
                 db.execute(
@@ -4524,7 +4487,7 @@ def compute_threshold_numbers(date: str = None):
 
     # --- 集合16：前6汇总聚合 ---
     if len(sids_all) >= 6:
-        top25, bottom24 = build_grid(sids_all[:6], db, use_date, cv_map)
+        top25, bottom24 = build_grid(sids_all[:6])
         if top25:
             for threshold, nums in [(25, top25), (24, bottom24)]:
                 db.execute(
@@ -4532,9 +4495,133 @@ def compute_threshold_numbers(date: str = None):
                     (use_date, threshold, json.dumps(nums)))
                 results.append({"collection_id": 16, "threshold": threshold, "summary_name": "", "count": len(nums)})
 
+    if close_db:
+        db.commit()
+        db.close()
+    return {"ok": True, "date": use_date, "results": results}
+
+
+@app.post("/api/threshold/compute")
+def compute_threshold_numbers(date: str = None, from_date: str = None, to_date: str = None):
+    """计算 汇总级复制25/24（每个汇总独立）+ 集合级（14=前4聚合, 16=前6聚合）
+    自动推进到最新抽签+1天；缺失快照时自动生成。
+    支持单日期(date)和时间段(from_date+to_date)。
+    """
+    from datetime import date as dt, timedelta
+    import time
+
+    # ═══ 时间段模式 ═══
+    if from_date and to_date:
+        d = dt.fromisoformat(from_date)
+        end = dt.fromisoformat(to_date)
+        if d > end:
+            return {"ok": False, "error": "from_date 不能大于 to_date"}
+        
+        rec_db = get_db()
+        max_draw_rec = rec_db.execute(
+            "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
+        ).fetchone()
+        max_draw = max_draw_rec["dt"] if max_draw_rec and max_draw_rec["dt"] else None
+        max_allowed = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat() if max_draw else dt.today().isoformat()
+        rec_db.close()
+
+        all_dates = []
+        all_results = []
+        errors = []
+        t0 = time.time()
+        
+        db = get_db()
+        while d <= end:
+            use_date = d.isoformat()
+            d += timedelta(days=1)
+            
+            # 安全检查（与单日期一致）
+            if use_date > max(max_allowed, dt.today().isoformat()):
+                errors.append(f"{use_date}: 超过允许范围")
+                continue
+            
+            # 检查并自动生成 col19 快照
+            col19_cnt = db.execute(
+                "SELECT COUNT(*) FROM daily_snapshots WHERE date=? AND collection_id=19", (use_date,)
+            ).fetchone()[0]
+            if col19_cnt == 0:
+                db.commit()
+                db.close()
+                r19 = save_daily_snapshot(19, use_date)
+                if not r19.get("ok"):
+                    errors.append(f"{use_date}: col19快照生成失败")
+                    db = get_db()
+                    continue
+                # 采集14和16（best effort）
+                save_daily_snapshot(14, use_date)
+                save_daily_snapshot(16, use_date)
+                db = get_db()
+            
+            # 调用核心计算
+            r = _compute_threshold_one_date(use_date, db=db)
+            if r.get("ok"):
+                all_dates.append(use_date)
+                all_results.extend(r.get("results", []))
+            else:
+                errors.append(f"{use_date}: {r.get('error', '未知')}")
+        
+        db.commit()
+        db.close()
+        
+        elapsed = round(time.time() - t0, 1)
+        return {
+            "ok": True,
+            "mode": "range",
+            "from": from_date,
+            "to": to_date,
+            "dates": all_dates,
+            "dates_count": len(all_dates),
+            "total_results": len(all_results),
+            "results": all_results,
+            "errors": errors,
+            "elapsed_sec": elapsed
+        }
+
+    # ═══ 单日期模式（原有逻辑）═══
+    db = get_db()
+    
+    # 确定目标日期：最新抽签日 + 1天
+    rec = db.execute(
+        "SELECT MAX(date) as dt FROM records WHERE draw_number IS NOT NULL AND draw_number > 0"
+    ).fetchone()
+    max_draw = rec["dt"] if rec and rec["dt"] else None
+
+    if date:
+        use_date = date
+    elif max_draw:
+        use_date = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat()
+    else:
+        use_date = dt.today().isoformat()
+
+    # 安全检查
+    max_allowed = (dt.fromisoformat(max_draw) + timedelta(days=1)).isoformat() if max_draw else dt.today().isoformat()
+    if use_date > max(max_allowed, dt.today().isoformat()):
+        db.close()
+        return {"ok": False, "error": f"日期 {use_date} 超过允许范围（最新抽签{max_draw}+1={max_allowed}）"}
+
+    # 检查并自动生成 col19 快照
+    col19_cnt = db.execute(
+        "SELECT COUNT(*) FROM daily_snapshots WHERE date=? AND collection_id=19", (use_date,)
+    ).fetchone()[0]
+    if col19_cnt == 0:
+        db.close()
+        r19 = save_daily_snapshot(19, use_date)
+        if not r19.get("ok"):
+            return {"ok": False, "error": f"col19 快照生成失败: {r19.get('error', r19.get('message', '未知'))}"}
+        save_daily_snapshot(14, use_date)
+        save_daily_snapshot(16, use_date)
+        db = get_db()
+
+    # 委托核心计算
+    result = _compute_threshold_one_date(use_date, db=db)
     db.commit()
     db.close()
-    return {"ok": True, "date": use_date, "results": results}
+    return result
 
 
 @app.get("/api/threshold/results")
