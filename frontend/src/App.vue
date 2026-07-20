@@ -1253,6 +1253,7 @@ function $notify(msg, isError = false) {
   toast._timer = setTimeout(() => { toast.show = false }, 3000)
 }
 const todayStr = new Date().toISOString().slice(0, 10)
+const tomorrowStr = new Date(Date.now() + 86400000).toISOString().slice(0, 10)
 
 function doLogout() {
   fetch('/number-warehouse/auth/logout', { method: 'POST' })
@@ -2005,8 +2006,8 @@ const running = ref(false)
 // 运行参数
 const simProjectIds = ref([])
 const simProjectRules = ref({})  // {projectId: ruleId}
-const simStart = ref('2020-03-18')
-const simEnd = ref(todayStr)
+const simStart = ref(todayStr)
+const simEnd = ref(tomorrowStr)
 
 // 查询参数
 const simQProject = ref(null)
@@ -2090,8 +2091,8 @@ async function loadSimRules() {
       projects.value.forEach(p => { if ((byP[p.id]||[]).length) simProjectRules.value[p.id] = byP[p.id][0].id })
     }
     // 默认日期范围
-    if (!simStart.value) simStart.value = '2020-03-18'
-    if (!simEnd.value) simEnd.value = todayStr
+    if (!simStart.value) simStart.value = todayStr
+    if (!simEnd.value) simEnd.value = tomorrowStr
     loadSimQuery()
   } catch (e) { console.error(e) }
 }
