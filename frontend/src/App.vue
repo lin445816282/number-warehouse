@@ -24,6 +24,7 @@
         <span class="rec-title">📋 记录</span>
         <div style="display:flex;gap:6px">
           <button class="rec-btn-analysis" @click="openAnalysis()">📊 分析</button>
+          <button class="rec-btn-analysis" @click="openMissingNumbers()">🔢 最长号码</button>
           <select v-model="recYear" @change="loadRecords()" class="form-input" style="width:auto;padding:6px 10px;font-size:12px">
             <option value="">全部年份</option>
             <option v-for="y in recYears" :key="y" :value="y">{{ y }}</option>
@@ -150,6 +151,48 @@
           </div>
           <div class="form-btns" style="margin-top:12px">
             <button class="btn-cancel" @click="showAnalysis=false">关闭</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 最长未出号码弹窗 -->
+      <div v-if="showMissing" class="form-overlay" @click.self="showMissing=false">
+        <div class="form-card" style="max-width:420px;max-height:90vh;overflow-y:auto">
+          <div class="form-title">🔢 最长未出号码 TOP25</div>
+          <div v-if="missingLoading" style="text-align:center;padding:20px">⏳ 分析中...</div>
+          <div v-else-if="missingData.error" style="color:#dc2626;padding:16px">{{ missingData.error }}</div>
+          <div v-else>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-size:12px;color:#64748b">截止 {{ missingData.latest_date }} · 共 {{ missingData.total_records }} 期</span>
+              <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="copyMissingNumbers">📋 复制25个号</button>
+            </div>
+            <!-- 表头 -->
+            <div style="display:flex;align-items:center;padding:6px 0;border-bottom:2px solid #334155;font-size:11px;color:#94a3b8;font-weight:600">
+              <span style="width:36px;text-align:center">#</span>
+              <span style="width:42px;text-align:center">号码</span>
+              <span style="flex:1;text-align:center">未出</span>
+              <span style="flex:1;text-align:center">历史最长</span>
+              <span style="width:80px;text-align:center">上次出现</span>
+            </div>
+            <div v-for="(n, i) in missingData.top25" :key="n.num"
+                 style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #1e293b;font-size:13px"
+                 :style="i < 5 ? {background:'rgba(220,38,38,0.06)'} : {}">
+              <span style="width:36px;text-align:center" :style="{color: i<3 ? '#f87171':'#64748b', fontWeight: i<3 ? '700':'400'}">{{ i+1 }}</span>
+              <span style="width:42px;text-align:center;font-weight:700;font-size:15px"
+                    :style="{color: n.current_gap >= 30 ? '#f87171' : n.current_gap >= 20 ? '#fbbf24' : '#e2e8f0'}">
+                {{ n.num }}
+              </span>
+              <span style="flex:1;text-align:center" :style="{color: n.current_gap >= 30 ? '#f87171' : n.current_gap >= 20 ? '#fbbf24' : '#94a3b8'}">
+                {{ n.current_gap }}期
+              </span>
+              <span style="flex:1;text-align:center;color:#64748b;font-size:11px">
+                {{ n.max_gap_range || (n.max_gap + '期') }}
+              </span>
+              <span style="width:80px;text-align:center;font-size:11px;color:#64748b">{{ n.last_date }}</span>
+            </div>
+          </div>
+          <div class="form-btns" style="margin-top:12px">
+            <button class="btn-cancel" @click="showMissing=false">关闭</button>
           </div>
         </div>
       </div>
@@ -1466,6 +1509,32 @@ async function doDelete(id) {
     await fetch(`${API}/records/${id}`, { method: 'DELETE' })
     loadRecords()
   } catch (e) { console.error(e) }
+}
+
+// ===== 最长未出号码 =====
+const showMissing = ref(false)
+const missingLoading = ref(false)
+const missingData = ref({})
+
+async function openMissingNumbers() {
+  showMissing.value = true; missingLoading.value = true; missingData.value = {}
+  try {
+    const res = await fetch(`${API}/missing-numbers`)
+    missingData.value = await res.json()
+  } catch (e) {
+    missingData.value = { error: e.message }
+  } finally {
+    missingLoading.value = false
+  }
+}
+
+function copyMissingNumbers() {
+  const nums = (missingData.value.top25 || []).map(n => n.num).join(',')
+  navigator.clipboard.writeText(nums).then(() => {
+    alert('已复制: ' + nums)
+  }).catch(() => {
+    prompt('复制以下号码:', nums)
+  })
 }
 
 // ===== 尾数分析 =====

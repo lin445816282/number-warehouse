@@ -4711,6 +4711,99 @@ class StripPrefixMiddleware:
             scope["path"] = scope["path"][len(self.prefix):] or "/"
         await self.app(scope, receive, send)
 
+# ═══════════════ 最长未出号码分析 ═══════════════
+@app.get("/api/missing-numbers")
+def get_missing_numbers():
+    """统计1-49每个号码的未出天数 + 历史最长间隔 + 出现次数"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT date, draw_number, day_seq FROM records ORDER BY date DESC").fetchall()
+    db.close()
+
+    if not rows:
+        return {"error": "无记录"}
+
+    # 从最新到最旧排列
+    total_records = len(rows)
+    latest_date = rows[0]["date"]
+
+    # 为每个号码 1-49 建立出现记录
+    num_dates = {i: [] for i in range(1, 50)}  # {num: [(date, day_seq), ...]} 从新到旧
+    for r in rows:
+        n = r["draw_number"]
+        if 1 <= n <= 49:
+            num_dates[n].append((r["date"], r["day_seq"]))
+
+    result = []
+    for n in range(1, 50):
+        appearances = num_dates[n]
+        count = len(appearances)
+
+        if count == 0:
+            # 从未出现
+            result.append({
+                "num": n,
+                "count": 0,
+                "last_date": "从未出现",
+                "current_gap": total_records,
+                "max_gap": total_records,
+                "gap_label": f"{total_records}期"
+            })
+            continue
+
+        # 当前间隔：从最新记录到这个号码最近一次出现之间隔了多少期
+        last_appear = appearances[0]
+        current_gap = 0
+        for r in rows:
+            if r["draw_number"] == n:
+                break
+            current_gap += 1
+
+        # 历史最大间隔：相邻两次出现之间的最大间隔
+        max_gap = 0
+        max_gap_range = ""
+        # 从最新到最旧排列，gap = 两次出现之间的记录数
+        prev_day_seq = last_appear[1]
+        for i in range(1, len(appearances)):
+            curr_day_seq = appearances[i][1]
+            gap = abs(prev_day_seq - curr_day_seq) - 1
+            if gap > max_gap:
+                max_gap = gap
+                # 记录区间
+                earlier = appearances[i][0]
+                later = appearances[i-1][0]
+                max_gap_range = f"{earlier}~{later}（{gap}期）"
+            prev_day_seq = curr_day_seq
+
+        # 首次出现前也是"间隔"
+        if count > 0:
+            first_day_seq = appearances[-1][1]
+            gap_before_first = first_day_seq - 1  # 第1期之前
+            if gap_before_first > max_gap:
+                max_gap = gap_before_first
+                max_gap_range = f"首期前（{max_gap}期）"
+
+        result.append({
+            "num": n,
+            "count": count,
+            "last_date": last_appear[0],
+            "current_gap": current_gap,
+            "max_gap": max_gap,
+            "gap_label": f"{current_gap}期",
+            "max_gap_range": max_gap_range,
+            "current_gap_days": f"距{latest_date}已{current_gap}期"
+        })
+
+    # 按当前间隔从大到小排序
+    result.sort(key=lambda x: x["current_gap"], reverse=True)
+
+    return {
+        "top25": result[:25],
+        "all": result,
+        "latest_date": latest_date,
+        "total_records": total_records
+    }
+
 # ═══════════════ 尾数走势分析 ═══════════════
 @app.get("/api/tail-analysis")
 def get_tail_analysis(year: str = None):
