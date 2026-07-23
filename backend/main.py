@@ -4714,33 +4714,31 @@ class StripPrefixMiddleware:
 # ═══════════════ 最长未出号码分析 ═══════════════
 @app.get("/api/missing-numbers")
 def get_missing_numbers():
-    """统计1-49每个号码的未出天数 + 历史最长间隔 + 出现次数"""
+    """统计1-49每个号码的未出期数 + 历史最长间隔（按记录索引算，跨年正确）"""
     db = get_db()
     db.row_factory = sqlite3.Row
-    rows = db.execute("SELECT date, draw_number, day_seq FROM records ORDER BY date DESC").fetchall()
+    rows = db.execute("SELECT date, draw_number FROM records ORDER BY date DESC").fetchall()
     db.close()
 
     if not rows:
         return {"error": "无记录"}
 
-    # 从最新到最旧排列
     total_records = len(rows)
     latest_date = rows[0]["date"]
 
-    # 为每个号码 1-49 建立出现记录
-    num_dates = {i: [] for i in range(1, 50)}  # {num: [(date, day_seq), ...]} 从新到旧
-    for r in rows:
+    # 为每个号码建立出现位置索引列表（idx越小=越新）
+    num_indices = {i: [] for i in range(1, 50)}
+    for idx, r in enumerate(rows):
         n = r["draw_number"]
         if 1 <= n <= 49:
-            num_dates[n].append((r["date"], r["day_seq"]))
+            num_indices[n].append(idx)
 
     result = []
     for n in range(1, 50):
-        appearances = num_dates[n]
-        count = len(appearances)
+        indices = num_indices[n]
+        count = len(indices)
 
         if count == 0:
-            # 从未出现
             result.append({
                 "num": n,
                 "count": 0,
@@ -4751,42 +4749,31 @@ def get_missing_numbers():
             })
             continue
 
-        # 当前间隔：从最新记录到这个号码最近一次出现之间隔了多少期
-        last_appear = appearances[0]
-        current_gap = 0
-        for r in rows:
-            if r["draw_number"] == n:
-                break
-            current_gap += 1
+        # 当前间隔 = 这个号码最近一次出现的位置（距最新记录隔了几期）
+        current_gap = indices[0]
 
-        # 历史最大间隔：相邻两次出现之间的最大间隔
+        # 历史最大间隔：相邻两次出现之间的最大间隔（按记录数）
         max_gap = 0
         max_gap_range = ""
-        # 从最新到最旧排列，gap = 两次出现之间的记录数
-        prev_day_seq = last_appear[1]
-        for i in range(1, len(appearances)):
-            curr_day_seq = appearances[i][1]
-            gap = abs(prev_day_seq - curr_day_seq) - 1
+        for i in range(1, len(indices)):
+            gap = indices[i] - indices[i-1] - 1
             if gap > max_gap:
                 max_gap = gap
-                # 记录区间
-                earlier = appearances[i][0]
-                later = appearances[i-1][0]
+                earlier = rows[indices[i]]["date"]   # 较旧的
+                later = rows[indices[i-1]]["date"]    # 较新的
                 max_gap_range = f"{earlier}~{later}（{gap}期）"
-            prev_day_seq = curr_day_seq
 
-        # 首次出现前也是"间隔"
-        if count > 0:
-            first_day_seq = appearances[-1][1]
-            gap_before_first = first_day_seq - 1  # 第1期之前
-            if gap_before_first > max_gap:
-                max_gap = gap_before_first
-                max_gap_range = f"首期前（{max_gap}期）"
+        # 首次出现前的间隔（该数第一次出现后，到最老记录的剩余记录数）
+        first_idx = indices[-1]
+        gap_before_first = total_records - first_idx - 1
+        if gap_before_first > max_gap:
+            max_gap = gap_before_first
+            max_gap_range = f"首次出现后（{max_gap}期）"
 
         result.append({
             "num": n,
             "count": count,
-            "last_date": last_appear[0],
+            "last_date": rows[indices[0]]["date"],
             "current_gap": current_gap,
             "max_gap": max_gap,
             "gap_label": f"{current_gap}期",
@@ -4794,7 +4781,6 @@ def get_missing_numbers():
             "current_gap_days": f"距{latest_date}已{current_gap}期"
         })
 
-    # 按当前间隔从大到小排序
     result.sort(key=lambda x: x["current_gap"], reverse=True)
 
     return {
