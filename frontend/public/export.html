@@ -405,24 +405,33 @@ async function collectData() {
 
 async function syncToStore() {
   const btn = document.getElementById('btnSync');
+  const date = document.getElementById('dateInput').value;
+  if (!date || date === 'yyyy-mm-dd') { alert('请先选择日期'); return; }
   btn.disabled = true;
   btn.textContent = '⏳ 同步中...';
-  const date = document.getElementById('dateInput').value;
   try {
     const cids = [19, 14, 16];
     const results = [];
     for (const cid of cids) {
       btn.textContent = '⏳ 集合'+cid+'...';
-      const resp = await apiFetch('/sync-store?collection_id=' + cid + '&date=' + date, { method: 'POST' });
-      const data = await resp.json();
-      results.push(data.ok ? cid+'✓' : cid+'✗');
+      // 重试3次，CF Tunnel POST 偶发超时
+      let ok = false;
+      for (let retry = 0; retry < 3; retry++) {
+        try {
+          const resp = await fetch(API+'/sync-store?collection_id='+cid+'&date='+date, {method:'POST'});
+          const data = await resp.json();
+          ok = data.ok;
+          break;
+        } catch(e) { if (retry < 2) await new Promise(r=>setTimeout(r,2000)); }
+      }
+      results.push(ok ? cid+'✓' : cid+'✗');
     }
     btn.textContent = '✅ ' + results.join(' ');
-    setTimeout(function(){ btn.textContent = '🏪 同步到门店'; btn.disabled = false; }, 3000);
+    loadData();
   } catch(e) {
     btn.textContent = '❌ 网络错误';
-    btn.disabled = false;
   }
+  setTimeout(function(){ btn.textContent = '🏪 同步到门店'; btn.disabled = false; }, 3000);
 }
 
 document.getElementById('dateInput').addEventListener('change', loadData);
