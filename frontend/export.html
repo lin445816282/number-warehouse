@@ -359,8 +359,8 @@ async function oneKeySync() {
   btn.disabled = true;
   const date = document.getElementById('dateInput').value;
   
-  // 集合14/16：先采集再同步，同时推个体门店
-  const cids = (CID === 14 || CID === 16) ? [14, 16] : [CID];
+  // 全部集合：19(六店)+14+16 → 同步全部8个门店
+  const cids = [19, 14, 16];
   
   btn.textContent = '⏳ 采集中...';
   for (const cid of cids) {
