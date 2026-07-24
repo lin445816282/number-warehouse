@@ -1529,7 +1529,7 @@ async function openMissingNumbers() {
 }
 
 function copyMissingNumbers() {
-  const nums = (missingData.value.top25 || []).map(n => n.num).join(',')
+  const nums = (missingData.value.top25 || []).map(n => n.num).join('.')
   navigator.clipboard.writeText(nums).then(() => {
     alert('已复制: ' + nums)
   }).catch(() => {
