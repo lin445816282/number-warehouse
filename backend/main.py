@@ -4293,9 +4293,12 @@ def sync_to_store(collection_id: int, date: str = None):
             "store": store,
             "date": use_date,
             "category": "cat_1783487972049",
-            "amount": rank or 0,
+            "amount": rank if rank else None,
             "note": f"集合{collection_id} 排位{rank} ← {contrib_names}"
         })
+        # 排位无效时不推（rank=None 表示数据未计算完成）
+        if rank is None or rank == 0:
+            records.pop()  # 移除刚加的无效记录
     else:
         # 查询 grid 数据获取记录范围
         db2 = get_db()
