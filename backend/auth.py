@@ -20,7 +20,7 @@ LOCKOUT_MINUTES = 30
 RATE_WINDOW_SECONDS = 900  # 15 分钟
 
 # 密码：从环境变量读取，无则用默认
-_PASSWORD = os.environ.get("NW_PASSWORD", "xiaolin2024")
+_PASSWORD = os.environ.get("NW_PASSWORD", "8283103")
 _PASSWORD_HASH = bcrypt.hashpw(_PASSWORD.encode(), bcrypt.gensalt())
 
 # 速率限制存储（内存，重启清零——可接受）
@@ -30,10 +30,10 @@ _lockout_until: dict[str, float] = {}
 # 路由白名单：无需认证
 _WHITELIST = {
     "/auth/login", "/auth/logout", "/favicon.ico",
-    "/api/threshold/results", "/api/threshold/compute", "/api/threshold",
+    "/api/threshold/results", "/api/threshold/compute", "/api/threshold/vote", "/api/threshold",
     "/export.html",
     "/api/export/daily-summary", "/api/export/daily-detail", "/api/export/grid-detail",
-    "/api/export/save-daily", "/api/export/sync-store",
+    "/api/export/save-daily", "/api/export/sync-store", "/api/export/push-warning", "/api/export/push-warning-range",
     "/api/export/collection-info", "/api/export/latest-snapshot-date",
     "/api/export/sync-cron", "/api/export/record-ranks",
 }

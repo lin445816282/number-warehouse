@@ -775,6 +775,16 @@ def draw_analysis_streaks():
     }
 
 
+def _push_to_number_warning(date_str: str, draw_number: int):
+    """推送到号码预警系统 number-warning(8025)。失败静默，不阻塞主流程。"""
+    try:
+        import httpx
+        payload = {"record_date": date_str, "source_number": f"{draw_number:02d}"}
+        httpx.post("http://127.0.0.1:8025/api/number/receive", json=payload, timeout=3)
+    except Exception:
+        pass
+
+
 @app.post("/api/records")
 def create_record(r: RecordIn):
     target = dt_date.fromisoformat(r.date)
@@ -801,6 +811,8 @@ def create_record(r: RecordIn):
                        timeout=3)
     except:
         pass
+    # 主动推送到号码预警系统 number-warning(8025)
+    _push_to_number_warning(r.date, r.draw_number)
     return {"ok": True, "record": dict(row)}
 
 
@@ -829,6 +841,8 @@ def update_record(rid: int, r: RecordUpdate):
     db.commit()
     row = db.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone()
     db.close()
+    # 主动推送到号码预警系统 number-warning(8025)（编辑开奖号/日期后同步覆盖）
+    _push_to_number_warning(new_date, new_draw)
     return {"ok": True, "record": dict(row)}
 
 
@@ -4361,6 +4375,95 @@ def sync_to_store(collection_id: int, date: str = None):
         return {"ok": False, "error": str(e)}
 
 
+# ── 推送开奖号到 number-warning 号码预警系统 ──
+@app.post("/api/export/push-warning")
+def push_to_warning(date: str = None):
+    """推送当日开奖号到 number-warning（8025）预警系统。接收接口开放无鉴权。"""
+    import httpx
+    from datetime import date as dt
+
+    # 确定日期（默认最新开奖日）
+    if date:
+        use_date = date
+    else:
+        db_tmp = get_db()
+        rec = db_tmp.execute("SELECT MAX(date) as dt FROM records").fetchone()
+        use_date = rec["dt"] or dt.today().isoformat()
+        db_tmp.close()
+
+    # 读开奖号
+    db = get_db()
+    row = db.execute("SELECT draw_number FROM records WHERE date=?", (use_date,)).fetchone()
+    db.close()
+
+    if not row or row["draw_number"] is None:
+        return {"ok": False, "error": f"{use_date} 抽签号尚未公布，禁止推送空数据"}
+
+    source_number = f"{row['draw_number']:02d}"  # 9 → '09'
+
+    payload = {
+        "record_date": use_date,
+        "source_number": source_number,
+    }
+
+    try:
+        resp = httpx.post(
+            "http://127.0.0.1:8025/api/number/receive",
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"ok": True, "record_date": use_date, "source_number": source_number,
+                    "id": data.get("id"), "message": data.get("message", "已接收")}
+        return {"ok": False, "error": f"number-warning 返回 HTTP {resp.status_code}: {resp.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/export/push-warning-range")
+def push_warning_range(start_date: str, end_date: str):
+    """批量推送日期段内开奖号到 number-warning。返回 synced/skipped 统计。"""
+    import httpx
+
+    if start_date > end_date:
+        return {"ok": False, "error": "开始日期不能晚于结束日期"}
+
+    db = get_db()
+    rows = db.execute(
+        "SELECT date, draw_number FROM records WHERE date BETWEEN ? AND ? AND draw_number IS NOT NULL ORDER BY date",
+        (start_date, end_date)
+    ).fetchall()
+    db.close()
+
+    if not rows:
+        return {"ok": False, "error": f"{start_date} ~ {end_date} 无开奖记录"}
+
+    synced = 0
+    updated = 0
+    failed = 0
+    errors = []
+    for r in rows:
+        payload = {"record_date": r["date"], "source_number": f"{r['draw_number']:02d}"}
+        try:
+            resp = httpx.post("http://127.0.0.1:8025/api/number/receive", json=payload, timeout=30)
+            data = resp.json()
+            if resp.status_code == 200 and data.get("ok"):
+                if data.get("updated"):
+                    updated += 1
+                else:
+                    synced += 1
+            else:
+                failed += 1
+                errors.append(f"{r['date']}: {data.get('error', resp.text[:80])}")
+        except Exception as e:
+            failed += 1
+            errors.append(f"{r['date']}: {e}")
+
+    return {"ok": True, "total": len(rows), "synced": synced, "updated": updated, "failed": failed,
+            "range": f"{start_date} ~ {end_date}", "errors": errors[:20]}
+
+
 # ── 归位：1-49 → A-L 组映射 ──────────────────
 @app.get("/api/direct-mapping")
 def get_direct_mapping():
@@ -4699,6 +4802,102 @@ def get_threshold_results(date: str = None):
 
     db.close()
     return {"date": use_date, "items": items, "col19_summaries": col19_summaries}
+
+
+@app.get("/api/threshold/vote")
+def threshold_vote(date: str = None, stores: str = None, vote: int = 2, direction: str = "positive"):
+    """多门店投票：统计各门店阈值号码的共识号码。
+    
+    Args:
+        date: 日期（不传自动取最新）
+        stores: 门店ID列表，逗号分隔，如 "1,2,3,4,5,6"（对应 summary_id）
+        vote: 投票阈值，号码至少在几家门店出现才选中（默认2）
+        direction: positive=复制25, negative=复制24
+    
+    Returns:
+        { ok, date, stores_selected: [summary_id], vote_threshold, direction,
+          store_nums: {sid: [numbers]}, consensus: [numbers_sorted] }
+    """
+    db = get_db()
+    from datetime import date as dt, timedelta
+
+    if date:
+        use_date = date
+    else:
+        rec = db.execute("SELECT MAX(date) as dt FROM collection_threshold_numbers").fetchone()
+        use_date = rec["dt"] if rec else dt.today().isoformat()
+
+    th_val = 25 if direction == "positive" else 24
+
+    # 解析门店ID（支持 summary_id 和 collection_id 14/16）
+    if stores:
+        try:
+            raw_ids = [int(s.strip()) for s in stores.split(",") if s.strip()]
+        except ValueError:
+            db.close()
+            return {"ok": False, "error": "stores 参数格式错误（应为逗号分隔的数字）"}
+    else:
+        # 默认用所有门店（6个汇总 + 2个集合）
+        sids_row = db.execute(
+            "SELECT summary_id FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id LIMIT 6",
+            (use_date,)
+        ).fetchall()
+        raw_ids = [r["summary_id"] for r in sids_row] + [14, 16]
+        if not raw_ids:
+            db.close()
+            return {"ok": False, "error": "无门店数据"}
+
+    # 将 raw_ids 映射为 DB collection_id: 14/16 → 直接, 其他 → -id
+    cid_map = {}  # display_name → db_collection_id
+    for rid in raw_ids:
+        if rid in (14, 16):
+            cid_map[str(rid)] = rid
+        else:
+            cid_map[str(rid)] = -rid
+
+    # 获取号码
+    store_nums = {}
+    cids = list(cid_map.values())
+    cids_ph = ",".join("?" * len(cids))
+    rows = db.execute(
+        f"SELECT collection_id, numbers_json FROM collection_threshold_numbers "
+        f"WHERE date=? AND collection_id IN ({cids_ph}) AND threshold=?",
+        [use_date] + cids + [th_val]
+    ).fetchall()
+
+    db_cid_to_display = {v: k for k, v in cid_map.items()}
+    for r in rows:
+        display_key = db_cid_to_display.get(r["collection_id"], str(r["collection_id"]))
+        nums = json.loads(r["numbers_json"])
+        store_nums[display_key] = nums
+
+    actual_stores = list(store_nums.keys())
+    if not actual_stores:
+        db.close()
+        return {"ok": False, "error": "所选门店无阈值数据，请先执行「计算」"}
+
+    # 投票：统计每个号码在几个门店出现
+    freq = {}
+    for sid, nums in store_nums.items():
+        for n in nums:
+            freq[n] = freq.get(n, 0) + 1
+
+    consensus = sorted([n for n, cnt in freq.items() if cnt >= vote])
+
+    db.close()
+    return {
+        "ok": True,
+        "date": use_date,
+        "direction": direction,
+        "threshold": th_val,
+        "stores_selected": raw_ids,
+        "stores_with_data": actual_stores,
+        "vote_threshold": vote,
+        "total_stores": len(actual_stores),
+        "store_nums": {str(sid): sorted(nums) for sid, nums in store_nums.items()},
+        "consensus": consensus,
+        "frequencies": {str(n): cnt for n, cnt in sorted(freq.items()) if cnt >= vote}
+    }
 
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")

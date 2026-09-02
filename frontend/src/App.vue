@@ -32,6 +32,15 @@
           <button class="btn-add" @click="openAdd">+ 新增</button>
         </div>
       </div>
+      <div class="sync-warning-bar">
+        <span class="sync-warning-label">🔮 同步至号码系统</span>
+        <input type="date" v-model="warnFromDate" class="form-input sync-date-input">
+        <span class="sync-warning-sep">至</span>
+        <input type="date" v-model="warnToDate" class="form-input sync-date-input">
+        <button class="btn-add sync-warning-btn" @click="syncToNumberSystem" :disabled="warningSyncing">
+          {{ warningSyncing ? '⏳ 同步中...' : '同步' }}
+        </button>
+      </div>
       <div v-if="records.length === 0" class="rec-empty">暂无记录，点击新增添加</div>
       <div class="rec-list">
         <div v-for="r in records" :key="r.id" class="rec-row">
@@ -490,6 +499,56 @@
           </div>
         </div>
       </template>
+
+      <!-- 多门店投票 -->
+      <div v-if="thGrouped.length > 0" class="th-block vote-block">
+        <div class="th-block-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>🗳️ 多门店投票</span>
+          <div style="display:flex;gap:6px">
+            <button class="vote-tgl-btn" :class="{ on: allStoresSelected }" @click="voteSelectedStores = allStoresSelected ? [] : voteStores.map(s=>s.id)">全选</button>
+            <button class="vote-tgl-btn" :class="{ on: voteSelectedStores.length === 0 }" @click="voteSelectedStores = []">清空</button>
+          </div>
+        </div>
+
+        <!-- 门店选择 -->
+        <div class="vote-store-row">
+          <label v-for="s in voteStores" :key="s.id" class="vote-store-cb" :class="{ active: voteSelectedStores.includes(s.id) }">
+            <input type="checkbox" :value="s.id" v-model="voteSelectedStores" @change="onVoteStoreChange">
+            {{ s.name }}
+          </label>
+        </div>
+
+        <!-- 控制栏 -->
+        <div class="vote-ctrl-bar">
+          <div class="vote-ctrl-row">
+            <div class="vote-mode-btns">
+              <button :class="{ active: voteDirection === 'positive' }" @click="voteDirection='positive'; loadVote()">📈 正 (25)</button>
+              <button :class="{ active: voteDirection === 'negative' }" @click="voteDirection='negative'; loadVote()">📉 负 (24)</button>
+            </div>
+            <select v-model.number="voteThreshold" @change="loadVote" class="vote-select">
+              <option v-for="n in voteOptions" :key="n" :value="n">{{ n }}/{{ voteSelectedStores.length }} 共识</option>
+            </select>
+          </div>
+          <button class="vote-submit-btn" @click="loadVote">
+            <span class="vote-submit-icon">🔍</span>
+            执行投票
+          </button>
+        </div>
+
+        <!-- 共识号码 -->
+        <div v-if="voteResult" style="margin-top:8px">
+          <div style="font-size:12px;color:#8899b0;margin-bottom:6px">
+            共识：<b>{{ voteResult.consensus?.length || 0 }}</b> 个号码（{{ voteResult.total_stores }}店{{ voteResult.vote_threshold }}选）
+          </div>
+          <div class="th-nums">
+            <span v-for="n in 49" :key="n" class="th-num" :class="voteResult.consensus?.includes(n) ? 'hit' : 'miss'" :title="voteResult.frequencies?.[n] ? '出现'+voteResult.frequencies[n]+'次' : ''">{{ n }}</span>
+          </div>
+          <div v-if="voteResult.consensus?.length" style="margin-top:8px;display:flex;gap:6px;align-items:flex-start">
+            <button class="th-copy-btn" @click="copyVoteResult()" title="复制共识号码" style="flex-shrink:0">📋 复制</button>
+            <span style="font-size:11px;color:#8899b0;word-break:break-all;line-height:1.6;min-width:0">{{ voteResult.consensus?.join('.') }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 演算视图 -->
@@ -1376,6 +1435,7 @@ async function loadThreshold() {
     thItems.value = d.items || []
     thCol19.value = d.col19_summaries || []
     thDate.value = d.date || thDate.value
+    initVoteStores()
   } catch(e) {
     thItems.value = []
     thCol19.value = []
@@ -1432,6 +1492,69 @@ function copyThNumbers(grp, th) {
     .then(() => $notify(`已复制${th}个号码`), () => $notify('复制失败', true))
 }
 
+// ===== 多门店投票 =====
+const voteStores = ref([])
+const voteSelectedStores = ref([])
+const voteDirection = ref('positive')
+const voteThreshold = ref(2)
+const voteResult = ref(null)
+const allStoresSelected = computed(() => voteStores.value.length > 0 && voteSelectedStores.value.length === voteStores.value.length)
+const voteOptions = computed(() => {
+  const n = voteSelectedStores.value.length
+  if (n < 2) return []
+  const min = Math.ceil(n / 2)
+  const opts = []
+  for (let i = min; i <= n; i++) opts.push(i)
+  return opts
+})
+
+function initVoteStores() {
+  // 从 thGrouped 提取门店：summary级(cid<0) + 集合14/16
+  const summaryStores = thGrouped.value
+    .filter(g => g.collection_id < 0)
+    .map(g => ({ id: -g.collection_id, name: g.label }))
+    .sort((a, b) => a.id - b.id)
+  const colStores = thGrouped.value
+    .filter(g => g.collection_id === 14 || g.collection_id === 16)
+    .map(g => ({ id: g.collection_id, name: g.label }))
+    .sort((a, b) => a.id - b.id)
+  voteStores.value = [...summaryStores, ...colStores]
+  voteSelectedStores.value = voteStores.value.map(s => s.id)
+  if (voteOptions.value.length > 0) {
+    voteThreshold.value = voteOptions.value[0]
+  }
+  loadVote()
+}
+
+function onVoteStoreChange() {
+  if (voteOptions.value.length > 0) {
+    voteThreshold.value = voteOptions.value[0]
+  }
+  loadVote()
+}
+
+async function loadVote() {
+  if (voteSelectedStores.value.length < 2) { voteResult.value = null; return }
+  try {
+    const params = new URLSearchParams({
+      direction: voteDirection.value,
+      vote: voteThreshold.value,
+      stores: voteSelectedStores.value.join(','),
+      date: thDate.value
+    })
+    const r = await fetch('api/threshold/vote?' + params, { credentials: 'include' })
+    const d = await r.json()
+    voteResult.value = d.ok ? d : null
+  } catch(e) { voteResult.value = null }
+}
+
+function copyVoteResult() {
+  const nums = voteResult.value?.consensus
+  if (!nums?.length) return
+  navigator.clipboard.writeText(nums.join('.'))
+    .then(() => $notify(`已复制${nums.length}个号码`), () => $notify('复制失败', true))
+}
+
 // ===== 数据记录 =====
 const records = ref([])
 const recPage = ref(1)
@@ -1442,6 +1565,9 @@ const recYears = ref([])
 const showForm = ref(false)
 const editingId = ref(null)
 const form = ref({ date: todayStr, draw_number: null })
+const warnFromDate = ref('')
+const warnToDate = ref('')
+const warningSyncing = ref(false)
 
 // ===== 数据记录 增删改查 =====
 const computedDaySeq = computed(() => {
@@ -1471,6 +1597,28 @@ async function loadYears() {
     const res = await fetch(`${API}/records/years`)
     recYears.value = await res.json()
   } catch (e) { console.error(e) }
+}
+
+async function syncToNumberSystem() {
+  if (!warnFromDate.value || !warnToDate.value) { $notify('请选择起止日期', true); return }
+  if (warnFromDate.value > warnToDate.value) { $notify('开始日期不能晚于结束日期', true); return }
+  warningSyncing.value = true
+  try {
+    const res = await apiFetch(`/export/push-warning-range?start_date=${warnFromDate.value}&end_date=${warnToDate.value}`, { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) {
+      const parts = [`新增 ${data.synced} 条`]
+      if (data.updated) parts.push(`覆盖 ${data.updated} 条`)
+      if (data.failed) parts.push(`失败 ${data.failed} 条`)
+      $notify(parts.join('，') + `（共 ${data.total} 条）`)
+    } else {
+      $notify(data.error || '同步失败', true)
+    }
+  } catch (e) {
+    $notify('网络错误', true)
+  } finally {
+    warningSyncing.value = false
+  }
 }
 
 function openAdd() {
@@ -3248,6 +3396,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 }
 .rec-btn-analysis:active { transform: scale(.95); }
 .rec-empty { text-align: center; padding: 40px 0; color: #bbb; font-size: 14px; }
+.sync-warning-bar { display: flex; align-items: center; gap: 8px; padding: 8px 4px 12px; flex-wrap: wrap; }
+.sync-warning-label { font-size: 13px; font-weight: 600; color: #7c4dff; white-space: nowrap; }
+.sync-date-input { width: auto; padding: 6px 8px; font-size: 12px; min-width: 118px; }
+.sync-warning-sep { color: #999; font-size: 12px; }
+.sync-warning-btn { padding: 6px 14px; font-size: 12px; }
+.sync-warning-btn:disabled { opacity: .6; }
 .rec-list { display: flex; flex-direction: column; gap: 6px; }
 .rec-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -3642,6 +3796,73 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .pf-table td:first-child, .pf-table td:nth-child(2) { text-align: left; }
 .pf-num { font-weight: 600; color: #1a2a4a; }
 .pf-result { font-weight: 700; }
+
+/* ===== 多门店投票 ===== */
+.vote-block { border-left: 3px solid #f59e0b !important; margin-top: 12px; }
+.vote-store-row { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+
+/* 全选/清空 切换按钮 */
+.vote-tgl-btn {
+  padding: 4px 12px; border: 1px solid #e0e0e0; border-radius: 14px;
+  background: #fff; color: #8899b0; font-size: 11px; font-weight: 500;
+  cursor: pointer; transition: all .2s;
+}
+.vote-tgl-btn:hover { border-color: #f59e0b; color: #f59e0b; }
+.vote-tgl-btn.on { background: #fef3c7; border-color: #f59e0b; color: #b45309; font-weight: 700; }
+
+/* 门店标签 */
+.vote-store-cb {
+  display:inline-flex; align-items:center; gap:3px;
+  padding:3px 8px; border-radius:6px; font-size:12px;
+  background:#f0f4f8; color:#8899b0; cursor:pointer;
+  transition:all .2s; border:1px solid transparent;
+}
+.vote-store-cb input { display:none; }
+.vote-store-cb.active { background:#fef3c7; color:#b45309; border-color:#f59e0b; font-weight:600; }
+
+/* 控制栏 */
+.vote-ctrl-bar {
+  background: #fafbfc; border-radius: 10px; padding: 12px;
+  margin-top: 10px; display: flex; flex-direction: column; gap: 10px;
+}
+.vote-ctrl-row {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+
+/* 正/负 模式切换 */
+.vote-mode-btns {
+  display: flex; border-radius: 8px; overflow: hidden;
+  border: 1px solid #e0e0e0; flex-shrink: 0;
+}
+.vote-mode-btns button {
+  padding: 6px 14px; border: none; background: #fafafa;
+  font-size: 12px; color: #999; cursor: pointer;
+  transition: all .2s; font-weight: 500;
+}
+.vote-mode-btns button:first-child { border-right: 1px solid #e0e0e0; }
+.vote-mode-btns button.active { background: #f59e0b; color: #fff; font-weight: 700; }
+.vote-mode-btns button:not(.active):hover { background: #fef3c7; color: #b45309; }
+
+/* 共识下拉 */
+.vote-select {
+  padding: 6px 10px; border: 1px solid #e0e0e0; border-radius: 8px;
+  font-size: 12px; background: #fff; color: #555; outline: none;
+  cursor: pointer; min-width: 100px;
+}
+.vote-select:focus { border-color: #f59e0b; }
+
+/* 执行投票 主按钮 */
+.vote-submit-btn {
+  width: 100%; padding: 10px 0; border: none; border-radius: 10px;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #fff; font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: all .2s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  box-shadow: 0 2px 8px rgba(245,158,11,.25);
+}
+.vote-submit-btn:hover { box-shadow: 0 4px 14px rgba(245,158,11,.35); transform: translateY(-1px); }
+.vote-submit-btn:active { transform: scale(.97); box-shadow: 0 1px 4px rgba(245,158,11,.2); }
+.vote-submit-icon { font-size: 16px; }
 .pf-result.pos { color: #22c55e; }
 .pf-result.neg { color: #ee0a24; }
 .pf-table tbody tr:hover { background: #f8fafc; }
@@ -3681,8 +3902,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .th-copy-btn { background: none; border: 1px solid #ccd5e0; border-radius: 6px; padding: 1px 6px; cursor: pointer; font-size: 12px; opacity: 0.6; transition: opacity .2s; }
 .th-copy-btn:hover { opacity: 1; }
 .th-copy-btn:active { background: #e8ecf1; }
-.th-nums { display: flex; flex-wrap: wrap; gap: 5px; }
-.th-num { width: 32px; height: 32px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+.th-nums { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.th-num { aspect-ratio: 1; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: clamp(10px, 2.4vw, 13px); font-weight: 700; min-width: 0; }
 .th-num.hit { background: #4da6ff; color: #fff; }
 .th-num.miss { background: #e8ecf1; color: #8899b0; }
 

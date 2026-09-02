@@ -37,6 +37,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .btn-sync { width:100%; padding:12px; background:#ff9800; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; margin:0 0 8px; cursor:pointer; }
 .btn-sync:active { opacity:.8; }
 .btn-sync:disabled { background:#aaa; }
+.btn-warn { width:100%; padding:12px; background:#7c4dff; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; margin:0 0 8px; cursor:pointer; }
+.btn-warn:active { opacity:.8; }
+.btn-warn:disabled { background:#aaa; }
 .cron-row { display:flex; align-items:center; gap:8px; padding:10px 0; font-size:14px; flex-wrap:wrap; }
 .cron-label { color:#888; }
 .cron-time { font-weight:700; color:#ff9800; font-size:16px; }
@@ -151,6 +154,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <button class="btn-collect" onclick="collectData()" id="btnCollect">📸 采集当日全量数据</button>
 <button class="btn-sync" onclick="syncToStore()" id="btnSync">🏪 同步到门店</button>
+<button class="btn-warn" onclick="pushWarning()" id="btnPushWarn">🔮 推送预警系统</button>
 
 <div class="cron-row">
   <span class="cron-label">⏰ 定时同步</span>
@@ -432,6 +436,30 @@ async function syncToStore() {
     btn.textContent = '❌ 网络错误';
   }
   setTimeout(function(){ btn.textContent = '🏪 同步到门店'; btn.disabled = false; }, 3000);
+}
+
+async function pushWarning() {
+  const btn = document.getElementById('btnPushWarn');
+  const date = document.getElementById('dateInput').value;
+  if (!date || date === 'yyyy-mm-dd') { alert('请先选择日期'); return; }
+  btn.disabled = true;
+  btn.textContent = '⏳ 推送中...';
+  try {
+    let ok = false, msg = '';
+    for (let retry = 0; retry < 3; retry++) {
+      try {
+        const resp = await fetch(API+'/push-warning?date='+date, {method:'POST'});
+        const data = await resp.json();
+        ok = data.ok;
+        msg = data.message || data.error || '';
+        if (ok) break;
+      } catch(e) { if (retry < 2) await new Promise(r=>setTimeout(r,2000)); }
+    }
+    btn.textContent = ok ? ('✅ ' + (msg || '已推送')) : ('❌ ' + (msg || '失败'));
+  } catch(e) {
+    btn.textContent = '❌ 网络错误';
+  }
+  setTimeout(function(){ btn.textContent = '🔮 推送预警系统'; btn.disabled = false; }, 3000);
 }
 
 document.getElementById('dateInput').addEventListener('change', loadData);
