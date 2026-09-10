@@ -10,6 +10,7 @@
       <button :class="{ active: view === 'collection' }" @click="view = 'collection'; loadCollections()">集合</button>
       <button :class="{ active: view === 'export' }" @click="view = 'export'">同步</button>
       <button :class="{ active: view === 'threshold' }" @click="view = 'threshold'; loadThreshold()">阈值</button>
+      <button :class="{ active: view === 'vote' }" @click="view = 'vote'; loadVoteStores()">投票</button>
       <button :class="{ active: view === 'records' }" @click="view = 'records'; loadRecords(); loadYears()">记录</button>
       <button :class="{ active: view === 'analysis' }" @click="view = 'analysis'; loadProjects(); loadAnalysis()">分析</button>
       <button :class="{ active: view === 'sim' }" @click="view = 'sim'; loadSimRules(); loadSimQuery()">演算</button>
@@ -25,6 +26,7 @@
         <div style="display:flex;gap:6px">
           <button class="rec-btn-analysis" @click="openAnalysis()">📊 分析</button>
           <button class="rec-btn-analysis" @click="openMissingNumbers()">🔢 最长号码</button>
+          <button class="rec-btn-analysis" @click="openTracking()">🎯 最长跟踪</button>
           <select v-model="recYear" @change="loadRecords()" class="form-input" style="width:auto;padding:6px 10px;font-size:12px">
             <option value="">全部年份</option>
             <option v-for="y in recYears" :key="y" :value="y">{{ y }}</option>
@@ -105,6 +107,11 @@
                 <div style="font-size:11px;color:#2563eb">📡 下期预测</div>
                 <div style="font-size:18px;font-weight:700;color:#1e40af">{{ analysisData.prediction.range }}</div>
                 <div style="font-size:10px;color:#3b82f6;margin-top:2px">{{ analysisData.prediction.hint }}</div>
+                <div v-if="analysisData.prediction.empirical" style="font-size:10px;color:#1d4ed8;margin-top:4px;line-height:1.6">
+                  📊 {{ analysisData.prediction.empirical.group }}尾连续{{ analysisData.prediction.empirical.current_streak }}天
+                  · 延续 {{ analysisData.prediction.empirical.p_continue }}% / 反转 {{ analysisData.prediction.empirical.p_reverse }}%
+                  <br><span style="color:#3b82f6">连续长度超 {{ analysisData.prediction.empirical.percentile }}% 历史（样本 {{ analysisData.prediction.empirical.samples }} 次）</span>
+                </div>
                 <div v-if="analysisNextDate" style="font-size:10px;color:#1d4ed8;margin-top:4px;font-weight:600">📅 {{ analysisNextDate }}</div>
               </div>
             </div>
@@ -136,6 +143,28 @@
                   </div>
                 </div>
               </div>
+            </div>
+            <!-- 策略回测 -->
+            <div v-if="backtestData && backtestData.strategies" style="margin-top:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px">
+              <div style="font-size:13px;font-weight:700;color:#e2e8f0;margin-bottom:2px">🧪 策略回测</div>
+              <div style="font-size:10px;color:#64748b;margin-bottom:8px">截止 {{ backtestData.latest_date }} · 随机基线 50%</div>
+              <div v-for="s in backtestData.strategies" :key="s.name" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+                <span style="width:150px;font-size:12px;color:#94a3b8;flex-shrink:0">{{ s.name }}</span>
+                <div style="flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden">
+                  <div :style="{width: s.rate+'%', background: s.rate>50?'#16a34a':'#475569', height:'100%'}"></div>
+                </div>
+                <span style="width:100px;text-align:right;font-size:12px;font-weight:700;flex-shrink:0" :style="{color: s.rate>50?'#4ade80':'#94a3b8'}">{{ s.rate }}%</span>
+              </div>
+              <details style="margin-top:8px">
+                <summary style="font-size:11px;color:#3b82f6;cursor:pointer">📉 连续N天后延续概率（点击展开）</summary>
+                <div v-for="row in backtestData.k_table" :key="row.group+'-'+row.k" style="display:flex;gap:6px;font-size:11px;color:#94a3b8;padding:2px 0">
+                  <span style="width:40px">{{ row.group }}尾</span>
+                  <span style="width:70px">连续{{ row.k }}天</span>
+                  <span style="width:90px">延续 {{ row.p_continue }}%</span>
+                  <span style="color:#64748b">{{ row.continue }}续/{{ row.reverse }}反</span>
+                </div>
+              </details>
+              <div style="font-size:10px;color:#64748b;margin-top:6px">💡 命中率越接近 50% 越随机，>50% 才有预测价值</div>
             </div>
           </div>
           <!-- 时间段详情（弹窗内嵌弹窗） -->
@@ -171,6 +200,13 @@
           <div v-if="missingLoading" style="text-align:center;padding:20px">⏳ 分析中...</div>
           <div v-else-if="missingData.error" style="color:#dc2626;padding:16px">{{ missingData.error }}</div>
           <div v-else>
+            <!-- 日期选择 -->
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+              <span style="font-size:12px;color:#64748b">截止日期</span>
+              <input type="date" v-model="missingDate" class="form-input" style="width:auto;padding:5px 8px;font-size:12px" @change="fetchMissing">
+              <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="fetchMissing">查询</button>
+              <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="missingDate='';fetchMissing()">最新</button>
+            </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
               <span style="font-size:12px;color:#64748b">截止 {{ missingData.latest_date }} · 共 {{ missingData.total_records }} 期</span>
               <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="copyMissingNumbers">📋 复制25个号</button>
@@ -199,6 +235,16 @@
               </span>
               <span style="width:80px;text-align:center;font-size:11px;color:#64748b">{{ n.last_date }}</span>
             </div>
+            <!-- 纯码展示（按号码排序） -->
+            <div style="margin-top:12px;padding-top:10px;border-top:2px solid #334155">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <span style="font-size:12px;color:#64748b">🔢 纯码（按号码排序）</span>
+                <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="copyMissingSorted">📋 复制排序码</button>
+              </div>
+              <div style="font-size:14px;font-weight:600;color:#e2e8f0;word-break:break-all;line-height:1.9;font-family:ui-monospace,monospace">
+                {{ missingSortedCode }}
+              </div>
+            </div>
           </div>
           <div class="form-btns" style="margin-top:12px">
             <button class="btn-cancel" @click="showMissing=false">关闭</button>
@@ -206,6 +252,225 @@
         </div>
       </div>
 
+    </div>
+
+    <!-- 最长跟踪演算弹窗 -->
+    <div v-if="showTracking" class="form-overlay" @click.self="showTracking=false">
+      <div class="form-card" style="max-width:640px;max-height:92vh;overflow-y:auto">
+        <div class="form-title">🎯 最长跟踪演算</div>
+
+        <!-- 历史记录列表 -->
+        <div v-if="trackingTab === 'list'">
+          <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+            <button class="btn-add" style="font-size:13px" @click="trackingTab='new'">➕ 新建演算</button>
+            <button class="btn-cancel" style="font-size:13px" @click="loadTrackingRuns()">🔄 刷新</button>
+            <button class="btn-cancel" style="font-size:13px" @click="openAlgoDoc()">📚 算法文档</button>
+          </div>
+          <div v-if="trackingRunsLoading" style="text-align:center;padding:20px">⏳ 加载中...</div>
+          <div v-else-if="trackingRuns.length === 0" style="text-align:center;padding:24px;color:#64748b">
+            暂无演算记录，点击「新建演算」开始
+          </div>
+          <div v-else>
+            <div v-for="run in trackingRuns" :key="run.id"
+                 class="tracking-run-card" @click="openTrackingRun(run.id)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div>
+                  <div style="font-weight:700;color:#1a2a4a">
+                    {{ run.name || ('演算 #' + run.id) }}
+                    <span v-if="run.is_stale" class="tracking-stale-badge">🔄 有更新</span>
+                  </div>
+                  <div style="font-size:12px;color:#64748b;margin-top:3px">
+                    N={{ run.min_n }}~{{ run.max_n }} · warmup={{ run.warmup }} · {{ run.total_records }}期
+                    <span v-if="run.years > 0" style="margin-left:6px">· 近{{ run.years }}年</span>
+                  </div>
+                  <div style="font-size:12px;color:#64748b;margin-top:2px">
+                    {{ run.date_from }} ~ {{ run.date_to }}
+                  </div>
+                </div>
+                <div style="text-align:right">
+                  <div style="font-size:12px;color:#64748b">{{ run.created_at }}</div>
+                  <div style="margin-top:4px">
+                    <span style="font-size:11px;color:#34d399">等额盈利 {{ run.eq_profitable }}</span>
+                    <span style="font-size:11px;color:#fbbf24;margin-left:6px">倍投盈利 {{ run.bt_profitable }}</span>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+                <button class="btn-cancel" style="font-size:11px;padding:3px 8px"
+                        @click.stop="recalcRun(run.id)"
+                        :disabled="recalcRunId === run.id">
+                  {{ recalcRunId === run.id ? '⏳ 演算中...' : '🔁 手动演算' }}
+                </button>
+                <span style="font-size:11px;color:#94a3b8">点击卡片查看详情</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 新建演算 -->
+        <div v-else-if="trackingTab === 'new'">
+          <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+            <span style="font-size:12px;color:#64748b">名称</span>
+            <input v-model="trackingName" class="form-input" style="flex:1;padding:6px 10px;font-size:13px" placeholder="如：冷号回补回测 2026-09">
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">最小号数</span>
+              <input type="number" v-model.number="trackingMinN" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="1" max="49">
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">最大号数</span>
+              <input type="number" v-model.number="trackingMaxN" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="1" max="49">
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">预热期数</span>
+              <input type="number" v-model.number="trackingWarmup" class="form-input" style="width:72px;padding:5px 8px;font-size:13px" min="10">
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">日期范围(年)</span>
+              <input type="number" v-model.number="trackingYears" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="0" max="20">
+              <span style="font-size:11px;color:#94a3b8">0=全部</span>
+            </div>
+          </div>
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:12px;line-height:1.6">
+            💡 从最长未出号码（冷号）中，按 {{ algoDoc.algo_count || 67 }} 种算法各拆分 {{ trackingMinN }}~{{ trackingMaxN }} 个号，回测历史命中与盈利。
+            命中率基线 = N/49（随机选号），盈利需命中率超过 N/47（等额口径盈亏平衡点）。
+          </div>
+          <div v-if="trackingRunning" style="text-align:center;padding:20px;color:#fbbf24">
+            ⏳ 演算中（约 50 秒）... 请稍候
+          </div>
+          <div class="form-btns" style="margin-top:8px">
+            <button class="btn-cancel" @click="trackingTab='list'">返回</button>
+            <button class="btn-add" @click="runTracking()" :disabled="trackingRunning">
+              {{ trackingRunning ? '演算中...' : '🚀 开始演算' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 演算详情 -->
+        <div v-else-if="trackingTab === 'detail'">
+          <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="trackingTab='list';loadTrackingRuns()">← 返回列表</button>
+            <span style="font-size:13px;color:#1a2a4a;font-weight:700">{{ trackingDetail.name || ('演算 #' + trackingDetail.id) }}</span>
+            <span style="font-size:11px;color:#64748b">N={{ trackingDetail.min_n }}~{{ trackingDetail.max_n }}</span>
+          </div>
+
+          <!-- 有更新提示 -->
+          <div v-if="trackingDetail.is_stale" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;background:#fef3c7;border-radius:8px">
+            <span style="font-size:12px;color:#92400e">🔄 数据有更新，结果可能过期</span>
+            <label style="font-size:12px;color:#92400e;display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" v-model="trackingAutoRecalc" style="margin:0"> 切换口径自动重算
+            </label>
+            <button class="btn-add" style="font-size:12px;padding:3px 10px" @click="recalcRun(trackingDetail.id)" :disabled="recalcRunId === trackingDetail.id">
+              {{ recalcRunId === trackingDetail.id ? '⏳ 演算中...' : '🔁 重新演算' }}
+            </button>
+          </div>
+
+          <!-- 口径切换 -->
+          <div style="display:flex;gap:6px;margin-bottom:10px">
+            <button :class="['tracking-tab', {active: trackingSortBy==='eq_pnl'}]" @click="switchTrackingSort('eq_pnl')">💰 等额口径</button>
+            <button :class="['tracking-tab', {active: trackingSortBy==='bt_pnl'}]" @click="switchTrackingSort('bt_pnl')">📈 倍投口径</button>
+          </div>
+
+          <!-- 摘要 -->
+          <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap" v-if="trackingDetail.results">
+            <div class="tracking-stat">
+              <div class="tracking-stat-value" style="color:#1a2a4a">{{ trackingDetail.results.length }}</div>
+              <div class="tracking-stat-label">方案总数</div>
+            </div>
+            <div class="tracking-stat">
+              <div class="tracking-stat-value" :style="{color: eqProfitCount > 0 ? '#34d399' : '#f87171'}">{{ eqProfitCount }}</div>
+              <div class="tracking-stat-label">等额盈利方案</div>
+            </div>
+            <div class="tracking-stat">
+              <div class="tracking-stat-value" :style="{color: btProfitCount > 0 ? '#34d399' : '#f87171'}">{{ btProfitCount }}</div>
+              <div class="tracking-stat-label">倍投盈利方案</div>
+            </div>
+            <div class="tracking-stat">
+              <div class="tracking-stat-value" style="color:#d97706">{{ bestEqPnl }}</div>
+              <div class="tracking-stat-label">最佳等额盈利</div>
+            </div>
+          </div>
+
+          <!-- 结果表 -->
+          <div v-if="trackingDetail.results && trackingDetail.results.length" style="margin-bottom:12px">
+            <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">
+              {{ trackingSortBy === 'eq_pnl' ? '💰 等额口径' : '📈 倍投口径' }} 盈利排名 TOP 30
+              <span style="color:#64748b">（命中率基线 = 随机选 N/49）</span>
+            </div>
+            <div class="tracking-table-wrap">
+              <table class="tracking-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>算法</th>
+                    <th>N</th>
+                    <th>命中率</th>
+                    <th>基线</th>
+                    <th>累计盈利</th>
+                    <th>单期均值</th>
+                    <th>最大回撤</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(r, i) in trackingDetail.results.slice(0, 30)" :key="r.id"
+                      :class="{ 'tracking-row-win': (trackingSortBy==='eq_pnl' ? r.eq_pnl : r.bt_pnl) > 0 }">
+                    <td>{{ i + 1 }}</td>
+                    <td class="tracking-algo-name">{{ r.algo_name }}</td>
+                    <td>{{ r.n }}</td>
+                    <td>{{ r.hit_rate.toFixed(1) }}%</td>
+                    <td style="color:#64748b">{{ (trackingDetail.baseline && trackingDetail.baseline[r.n]) || '—' }}%</td>
+                    <td :style="{color: (trackingSortBy==='eq_pnl' ? r.eq_pnl : r.bt_pnl) > 0 ? '#34d399' : '#f87171', fontWeight:700}">
+                      {{ (trackingSortBy==='eq_pnl' ? r.eq_pnl : r.bt_pnl).toLocaleString() }}
+                    </td>
+                    <td>{{ (trackingSortBy==='eq_pnl' ? r.eq_avg : (r.bt_pnl / (r.total || 1))).toFixed(2) }}</td>
+                    <td style="color:#f87171">{{ r.max_drawdown.toLocaleString() }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="trackingDetail.results && trackingDetail.results.length" style="font-size:11px;color:#64748b;line-height:1.7;margin-bottom:10px">
+            ⚠️ <b>诚实提示</b>：命中率接近随机基线说明冷号回补信号弱；47 赔率 < 49 号码，等额口径长期负期望。
+            倍投口径盈利数字大是因投入额随遗漏指数增长（杠杆放大），不可与等额口径直接比较。
+          </div>
+
+          <div class="form-btns">
+            <button class="btn-cancel" @click="deleteTrackingRun(trackingDetail.id)">🗑 删除本次演算</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 算法文档弹窗 -->
+    <div v-if="showAlgoDoc" class="form-overlay" @click.self="showAlgoDoc=false">
+      <div class="form-card" style="max-width:640px;max-height:92vh;overflow-y:auto">
+        <div class="form-title">📚 算法文档（共 {{ algoDoc.algo_count }} 种）</div>
+        <div v-for="cat in algoDoc.categories" :key="cat.category" style="margin-bottom:14px">
+          <div style="font-weight:700;color:#1a2a4a;font-size:13px;margin-bottom:4px">{{ cat.category }}</div>
+          <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">{{ cat.note }}</div>
+          <table class="tracking-table" style="min-width:0">
+            <thead>
+              <tr><th style="width:40px">ID</th><th>算法</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="a in cat.algorithms" :key="a.id">
+                <td style="color:#64748b">{{ a.id }}</td>
+                <td class="tracking-algo-name">{{ a.name }}</td>
+                <td style="color:#64748b;font-size:11px">{{ a.desc }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="font-size:11px;color:#64748b;line-height:1.7;margin-top:4px">
+          ⚠️ 命中率基线 = N/49（随机选号）；等额口径盈亏平衡点 = N/47；47 赔率 &lt; 49 号码，等额口径长期负期望。
+          倍投口径盈利是杠杆放大，不可与等额口径直接比较。
+        </div>
+        <div class="form-btns" style="margin-top:10px">
+          <button class="btn-cancel" @click="showAlgoDoc=false">关闭</button>
+        </div>
+      </div>
     </div>
 
     <!-- 组别设置视图 -->
@@ -494,31 +759,47 @@
               <button class="th-copy-btn" @click="copyThNumbers(grp, th)" title="复制号码列表">📋</button>
             </div>
             <div class="th-nums">
-              <span v-for="n in 49" :key="n" class="th-num" :class="grp.thresholds[th]?.numbers?.includes(n) ? 'hit' : 'miss'">{{ n }}</span>
+              <span v-for="n in 49" :key="n" class="th-num" :class="grp.thresholds[th]?.numbers?.includes(n) ? 'hit' : 'miss'">{{ pad2(n) }}</span>
             </div>
           </div>
         </div>
       </template>
 
-      <!-- 多门店投票 -->
+      <!-- 多门店投票（已迁移） -->
       <div v-if="thGrouped.length > 0" class="th-block vote-block">
+        <div class="th-block-title">🗳️ 多门店投票</div>
+        <div style="font-size:12px;color:#8899b0;padding:8px 0">
+          已迁移至顶部「投票」tab（含投注单号码注数累计功能）。
+        </div>
+      </div>
+    </div>
+
+    <!-- 投票视图 -->
+    <div v-if="view === 'vote'" class="threshold-view">
+      <div class="sim-header">
+        <span class="sim-title">🗳️ 多门店投票</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="date" v-model="voteDate" @change="loadVoteStores" class="th-date-input">
+          <button class="btn-add" @click="loadVoteStores">刷新</button>
+        </div>
+      </div>
+      <div v-if="voteMsg" class="th-msg" :class="voteMsgType">{{ voteMsg }}</div>
+
+      <!-- 门店选择 + 投票 -->
+      <div class="th-block vote-block" style="margin-top:0">
         <div class="th-block-title" style="display:flex;justify-content:space-between;align-items:center">
-          <span>🗳️ 多门店投票</span>
+          <span>🏪 门店</span>
           <div style="display:flex;gap:6px">
             <button class="vote-tgl-btn" :class="{ on: allStoresSelected }" @click="voteSelectedStores = allStoresSelected ? [] : voteStores.map(s=>s.id)">全选</button>
             <button class="vote-tgl-btn" :class="{ on: voteSelectedStores.length === 0 }" @click="voteSelectedStores = []">清空</button>
           </div>
         </div>
-
-        <!-- 门店选择 -->
         <div class="vote-store-row">
           <label v-for="s in voteStores" :key="s.id" class="vote-store-cb" :class="{ active: voteSelectedStores.includes(s.id) }">
             <input type="checkbox" :value="s.id" v-model="voteSelectedStores" @change="onVoteStoreChange">
             {{ s.name }}
           </label>
         </div>
-
-        <!-- 控制栏 -->
         <div class="vote-ctrl-bar">
           <div class="vote-ctrl-row">
             <div class="vote-mode-btns">
@@ -534,20 +815,59 @@
             执行投票
           </button>
         </div>
-
         <!-- 共识号码 -->
         <div v-if="voteResult" style="margin-top:8px">
           <div style="font-size:12px;color:#8899b0;margin-bottom:6px">
-            共识：<b>{{ voteResult.consensus?.length || 0 }}</b> 个号码（{{ voteResult.total_stores }}店{{ voteResult.vote_threshold }}选）
+            共识：<b>{{ voteResult.consensus?.length || 0 }}</b> 个号码（{{ voteResult.total_stores }}店{{ voteResult.vote_threshold }}选 · {{ voteResult.direction === 'positive' ? '正25' : '负24' }}）
           </div>
           <div class="th-nums">
-            <span v-for="n in 49" :key="n" class="th-num" :class="voteResult.consensus?.includes(n) ? 'hit' : 'miss'" :title="voteResult.frequencies?.[n] ? '出现'+voteResult.frequencies[n]+'次' : ''">{{ n }}</span>
+            <span v-for="n in 49" :key="n" class="th-num" :class="voteResult.consensus?.includes(n) ? 'hit' : 'miss'" :title="voteResult.frequencies?.[n] ? '出现'+voteResult.frequencies[n]+'次' : ''">{{ pad2(n) }}</span>
           </div>
           <div v-if="voteResult.consensus?.length" style="margin-top:8px;display:flex;gap:6px;align-items:flex-start">
             <button class="th-copy-btn" @click="copyVoteResult()" title="复制共识号码" style="flex-shrink:0">📋 复制</button>
-            <span style="font-size:11px;color:#8899b0;word-break:break-all;line-height:1.6;min-width:0">{{ voteResult.consensus?.join('.') }}</span>
+            <span style="font-size:11px;color:#8899b0;word-break:break-all;line-height:1.6;min-width:0">{{ voteResult.consensus?.map(n => pad2(n)).join('.') }}</span>
           </div>
         </div>
+      </div>
+
+      <!-- 投注单（新功能：号码注数累计） -->
+      <div v-if="voteResult?.consensus?.length || betGroups.length" class="th-block" style="border-left:3px solid #10b981 !important">
+        <div class="th-block-title">🧾 投注单（号码注数累计）</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <label style="font-size:11px;color:#8899b0;white-space:nowrap">注数</label>
+          <input v-model.number="betNum" type="number" step="0.1" min="0" class="form-input" style="width:80px;padding:5px 8px;font-size:12px">
+          <label style="font-size:11px;color:#8899b0;white-space:nowrap">号码</label>
+          <input v-model="betManualNums" class="form-input" style="flex:1;min-width:140px;padding:5px 8px;font-size:12px" placeholder="留空=当前共识号码，或手动填 03.05.12">
+          <button class="btn-add" @click="addBetGroup" :disabled="!betNum">➕ 添加</button>
+        </div>
+
+        <!-- 已添加组 -->
+        <div v-if="betGroups.length" style="margin-bottom:8px">
+          <div v-for="(g,i) in betGroups" :key="g.id" style="display:flex;align-items:flex-start;gap:6px;padding:5px 0;border-bottom:1px solid #e0e0e0;font-size:12px">
+            <span style="color:#64748b;flex-shrink:0">#{{ i+1 }}</span>
+            <span style="font-weight:700;color:#000;flex-shrink:0">{{ g.num }}</span>
+            <span style="color:#000;word-break:break-all;flex:1;min-width:0">{{ g.numbers.map(n => pad2(n)).join('.') }}</span>
+            <button @click="removeBetGroup(g.id)" style="color:#dc2626;flex-shrink:0;background:none;border:none;cursor:pointer">🗑</button>
+          </div>
+        </div>
+
+        <!-- 累计分配（1-49 金额） -->
+        <div v-if="betGroups.length">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:12px;color:#64748b">累计分配（1-49 金额）</span>
+            <div style="display:flex;gap:6px">
+              <button class="th-copy-btn" @click="copyBetExcel()">📋 号码+金额</button>
+              <button class="th-copy-btn" @click="copyBetAmounts()">📋 仅金额</button>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">
+            <div v-for="it in betFull49" :key="it.num" style="text-align:center;border:1px solid #e0e0e0;border-radius:6px;padding:3px 2px;background:#fff">
+              <div style="font-size:10px;color:#94a3b8">{{ pad2(it.num) }}</div>
+              <div style="font-size:12px;font-weight:700" :style="{color: it.total > 0 ? '#000' : '#cbd5e1'}">{{ it.total }}</div>
+            </div>
+          </div>
+        </div>
+        <div v-else style="font-size:11px;color:#64748b">添加组后，相同号码的注数会自动累加汇总</div>
       </div>
     </div>
 
@@ -1435,7 +1755,6 @@ async function loadThreshold() {
     thItems.value = d.items || []
     thCol19.value = d.col19_summaries || []
     thDate.value = d.date || thDate.value
-    initVoteStores()
   } catch(e) {
     thItems.value = []
     thCol19.value = []
@@ -1488,7 +1807,7 @@ async function computeThreshold() {
 function copyThNumbers(grp, th) {
   const nums = grp.thresholds[th]?.numbers
   if (!nums || nums.length === 0) return
-  navigator.clipboard.writeText(nums.join('.'))
+  navigator.clipboard.writeText(nums.map(n => pad2(n)).join('.'))
     .then(() => $notify(`已复制${th}个号码`), () => $notify('复制失败', true))
 }
 
@@ -1498,6 +1817,9 @@ const voteSelectedStores = ref([])
 const voteDirection = ref('positive')
 const voteThreshold = ref(2)
 const voteResult = ref(null)
+const voteDate = ref('')
+const voteMsg = ref('')
+const voteMsgType = ref('')
 const allStoresSelected = computed(() => voteStores.value.length > 0 && voteSelectedStores.value.length === voteStores.value.length)
 const voteOptions = computed(() => {
   const n = voteSelectedStores.value.length
@@ -1526,6 +1848,31 @@ function initVoteStores() {
   loadVote()
 }
 
+async function loadVoteStores() {
+  // 从独立接口获取门店列表（投票tab专用）
+  voteMsg.value = ''; voteMsgType.value = ''
+  try {
+    const q = voteDate.value ? '?date=' + voteDate.value : ''
+    const r = await fetch('api/vote/stores' + q, { credentials: 'include' })
+    const d = await r.json()
+    if (d.ok) {
+      voteStores.value = d.stores || []
+      voteDate.value = d.date || voteDate.value
+      voteSelectedStores.value = voteStores.value.map(s => s.id)
+      if (voteOptions.value.length > 0) voteThreshold.value = voteOptions.value[0]
+      loadVote()
+    } else {
+      voteMsg.value = '⚠️ ' + (d.error || '无数据')
+      voteMsgType.value = 'err'
+      voteStores.value = []
+      voteResult.value = null
+    }
+  } catch (e) {
+    voteMsg.value = '❌ ' + e.message
+    voteMsgType.value = 'err'
+  }
+}
+
 function onVoteStoreChange() {
   if (voteOptions.value.length > 0) {
     voteThreshold.value = voteOptions.value[0]
@@ -1540,7 +1887,7 @@ async function loadVote() {
       direction: voteDirection.value,
       vote: voteThreshold.value,
       stores: voteSelectedStores.value.join(','),
-      date: thDate.value
+      date: voteDate.value
     })
     const r = await fetch('api/threshold/vote?' + params, { credentials: 'include' })
     const d = await r.json()
@@ -1548,12 +1895,100 @@ async function loadVote() {
   } catch(e) { voteResult.value = null }
 }
 
+function pad2(n) { return String(n).padStart(2, '0') }
+
 function copyVoteResult() {
   const nums = voteResult.value?.consensus
   if (!nums?.length) return
-  navigator.clipboard.writeText(nums.join('.'))
+  navigator.clipboard.writeText(nums.map(n => pad2(n)).join('.'))
     .then(() => $notify(`已复制${nums.length}个号码`), () => $notify('复制失败', true))
 }
+
+// ===== 投注单（号码注数累计） =====
+const betNum = ref(1)
+const betManualNums = ref('')
+const betGroups = ref([])
+const BET_KEY = 'nw_bet_groups'
+
+function parseNums(s) {
+  return s.split(/[.\s,，、]+/).map(x => parseInt(x, 10)).filter(n => n >= 1 && n <= 49)
+}
+
+function saveBetGroups() {
+  try { localStorage.setItem(BET_KEY, JSON.stringify(betGroups.value)) } catch(e) {}
+}
+
+function loadBetGroups() {
+  try {
+    const d = JSON.parse(localStorage.getItem(BET_KEY) || '[]')
+    if (Array.isArray(d)) betGroups.value = d
+  } catch(e) {}
+}
+
+const betSummary = computed(() => {
+  const map = {}
+  for (const g of betGroups.value) {
+    for (const n of g.numbers) {
+      map[n] = (map[n] || 0) + g.num
+    }
+  }
+  return map
+})
+
+const betSummaryList = computed(() => {
+  return Object.entries(betSummary.value)
+    .map(([num, total]) => ({ num: Number(num), total }))
+    .sort((a, b) => a.num - b.num)
+})
+
+const betFull49 = computed(() => {
+  const list = []
+  for (let n = 1; n <= 49; n++) {
+    list.push({ num: n, total: betSummary.value[n] || 0 })
+  }
+  return list
+})
+
+function addBetGroup() {
+  const num = betNum.value
+  if (!num || num <= 0) return alert('请填写注数（大于0）')
+  let numbers
+  if (betManualNums.value.trim()) {
+    numbers = parseNums(betManualNums.value)
+  } else {
+    numbers = voteResult.value?.consensus || []
+  }
+  if (!numbers.length) return alert('无号码可添加（请先投票或手动填号码）')
+  betGroups.value.push({ id: Date.now(), num, numbers: [...new Set(numbers)].sort((a, b) => a - b) })
+  betManualNums.value = ''
+  saveBetGroups()
+}
+
+function removeBetGroup(id) {
+  betGroups.value = betGroups.value.filter(g => g.id !== id)
+  saveBetGroups()
+}
+
+function copyBetSummary() {
+  if (!betSummaryList.value.length) return
+  const text = betSummaryList.value.map(it => `${pad2(it.num)}: ${it.total}`).join('\n')
+  navigator.clipboard.writeText(text)
+    .then(() => $notify('已复制投注单'), () => $notify('复制失败', true))
+}
+
+function copyBetExcel() {
+  const text = betFull49.value.map(it => `${pad2(it.num)}\t${it.total}`).join('\n')
+  navigator.clipboard.writeText(text)
+    .then(() => $notify('已复制（号码+金额，Tab分隔，可直接粘贴Excel）'), () => $notify('复制失败', true))
+}
+
+function copyBetAmounts() {
+  const text = betFull49.value.map(it => it.total).join('\n')
+  navigator.clipboard.writeText(text)
+    .then(() => $notify('已复制49个金额（换行分隔，可粘贴Excel一列）'), () => $notify('复制失败', true))
+}
+
+loadBetGroups()
 
 // ===== 数据记录 =====
 const records = ref([])
@@ -1663,18 +2098,34 @@ async function doDelete(id) {
 const showMissing = ref(false)
 const missingLoading = ref(false)
 const missingData = ref({})
+const missingDate = ref('')
 
-async function openMissingNumbers() {
-  showMissing.value = true; missingLoading.value = true; missingData.value = {}
+async function fetchMissing() {
+  missingLoading.value = true; missingData.value = {}
   try {
-    const res = await fetch(`${API}/missing-numbers`)
+    const q = missingDate.value ? `?date=${missingDate.value}` : ''
+    const res = await fetch(`${API}/missing-numbers${q}`)
     missingData.value = await res.json()
+    if (!missingDate.value && missingData.value.latest_date) {
+      missingDate.value = missingData.value.latest_date
+    }
   } catch (e) {
     missingData.value = { error: e.message }
   } finally {
     missingLoading.value = false
   }
 }
+
+async function openMissingNumbers() {
+  showMissing.value = true
+  missingDate.value = ''
+  await fetchMissing()
+}
+
+const missingSortedCode = computed(() => {
+  const nums = (missingData.value.top25 || []).map(n => n.num).slice().sort((a, b) => a - b)
+  return nums.length ? nums.join('.') : ''
+})
 
 function copyMissingNumbers() {
   const nums = (missingData.value.top25 || []).map(n => n.num).join('.')
@@ -1685,6 +2136,183 @@ function copyMissingNumbers() {
   })
 }
 
+function copyMissingSorted() {
+  const code = missingSortedCode.value
+  if (!code) return alert('暂无数据')
+  navigator.clipboard.writeText(code).then(() => {
+    alert('已复制: ' + code)
+  }).catch(() => {
+    prompt('复制以下号码:', code)
+  })
+}
+
+// ===== 最长跟踪演算 =====
+const showTracking = ref(false)
+const trackingTab = ref('list')   // list | new | detail
+const trackingRuns = ref([])
+const trackingRunsLoading = ref(false)
+const trackingName = ref('')
+const trackingMinN = ref(3)
+const trackingMaxN = ref(25)
+const trackingWarmup = ref(100)
+const trackingRunning = ref(false)
+const trackingDetail = ref({})
+const trackingSortBy = ref('eq_pnl')
+const trackingYears = ref(2)          // 日期范围：最近 N 年（0=全部）
+const trackingAutoRecalc = ref(true)  // 切换算法/口径时，若有更新自动重算
+const recalcRunId = ref(null)         // 正在重算的 run id
+const showAlgoDoc = ref(false)        // 算法文档弹窗
+const algoDoc = ref({ algo_count: 0, categories: [] })
+
+async function openTracking() {
+  showTracking.value = true
+  trackingTab.value = 'list'
+  await loadTrackingRuns()
+}
+
+async function loadTrackingRuns() {
+  trackingRunsLoading.value = true
+  try {
+    const res = await apiFetch('/longest-tracking/runs')
+    const data = await res.json()
+    trackingRuns.value = data.runs || []
+  } catch (e) {
+    trackingRuns.value = []
+  } finally {
+    trackingRunsLoading.value = false
+  }
+}
+
+async function runTracking() {
+  if (trackingMinN.value < 1 || trackingMaxN.value > 49 || trackingMinN.value > trackingMaxN.value) {
+    alert('号数范围无效（1~49，且最小 ≤ 最大）')
+    return
+  }
+  trackingRunning.value = true
+  try {
+    const res = await apiFetch('/longest-tracking/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: trackingName.value,
+        min_n: trackingMinN.value,
+        max_n: trackingMaxN.value,
+        warmup: trackingWarmup.value,
+        years: trackingYears.value,
+      }),
+    })
+    const data = await res.json()
+    if (data.ok) {
+      $notify(`演算完成！共 ${data.total_results} 个方案，等额盈利 ${data.eq_profitable} 个，倍投盈利 ${data.bt_profitable} 个`)
+      await openTrackingRun(data.run_id)
+    } else {
+      $notify('演算失败：' + (data.detail || JSON.stringify(data)), true)
+    }
+  } catch (e) {
+    $notify('演算失败：' + e.message, true)
+  } finally {
+    trackingRunning.value = false
+  }
+}
+
+async function openTrackingRun(runId) {
+  trackingTab.value = 'detail'
+  trackingDetail.value = { id: runId }
+  await loadTrackingDetail()
+}
+
+async function loadTrackingDetail() {
+  const runId = trackingDetail.value.id
+  if (!runId) return
+  try {
+    const res = await apiFetch(`/longest-tracking/runs/${runId}?sort_by=${trackingSortBy.value}`)
+    const data = await res.json()
+    trackingDetail.value = data
+  } catch (e) {
+    $notify('加载演算详情失败：' + e.message, true)
+  }
+}
+
+// 切换口径（等额/倍投）：若数据有更新且开启自动重算，先重算再加载
+async function switchTrackingSort(sortBy) {
+  if (trackingSortBy.value === sortBy && trackingDetail.value.results) {
+    return
+  }
+  trackingSortBy.value = sortBy
+  if (trackingDetail.value.is_stale && trackingAutoRecalc.value) {
+    $notify('检测到数据更新，自动重算中...')
+    const ok = await doRecalc(trackingDetail.value.id)
+    if (ok) { await loadTrackingDetail() }
+    return
+  }
+  await loadTrackingDetail()
+}
+
+// 执行重算（返回是否成功），不弹完成提示
+async function doRecalc(runId) {
+  if (recalcRunId.value) return false
+  recalcRunId.value = runId
+  try {
+    const res = await apiFetch(`/longest-tracking/runs/${runId}/recalc`, { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) return true
+    $notify('重算失败：' + (data.detail || '未知'), true)
+    return false
+  } catch (e) {
+    $notify('重算失败：' + e.message, true)
+    return false
+  } finally {
+    recalcRunId.value = null
+  }
+}
+
+// 卡片「手动演算」按钮：重算后刷新列表 + 若正在看该详情则刷新详情
+async function recalcRun(runId) {
+  $notify('正在重新演算...（约 30~60 秒）')
+  const ok = await doRecalc(runId)
+  if (ok) {
+    $notify('重算完成，结果已更新')
+    await loadTrackingRuns()
+    if (trackingDetail.value.id === runId) await loadTrackingDetail()
+  }
+}
+
+// 算法文档
+async function openAlgoDoc() {
+  try {
+    const res = await apiFetch('/longest-tracking/algorithms/doc')
+    algoDoc.value = await res.json()
+    showAlgoDoc.value = true
+  } catch (e) {
+    $notify('加载算法文档失败：' + e.message, true)
+  }
+}
+
+const eqProfitCount = computed(() => {
+  const r = trackingDetail.value.results
+  return r ? r.filter(x => x.eq_pnl > 0).length : 0
+})
+const btProfitCount = computed(() => {
+  const r = trackingDetail.value.results
+  return r ? r.filter(x => x.bt_pnl > 0).length : 0
+})
+const bestEqPnl = computed(() => {
+  const r = trackingDetail.value.results
+  if (!r || !r.length) return 0
+  return Math.max(...r.map(x => x.eq_pnl)).toLocaleString()
+})
+
+async function deleteTrackingRun(runId) {
+  if (!confirm('确认删除本次演算记录？')) return
+  try {
+    await apiFetch(`/longest-tracking/runs/${runId}`, { method: 'DELETE' })
+    trackingTab.value = 'list'
+    await loadTrackingRuns()
+  } catch (e) {
+    $notify('删除失败：' + e.message, true)
+  }
+}
+
 // ===== 尾数分析 =====
 const showAnalysis = ref(false)
 const analysisLoading = ref(false)
@@ -1692,6 +2320,7 @@ const analysisData = ref({})
 const analysisTable = ref([])
 const analysisNextDate = ref('')
 const analysisStreaks = ref(null)
+const backtestData = ref(null)
 
 function showAnalysisPeriods(group, g) {
   const periods = (g.periods || []).map(p => ({
@@ -1708,12 +2337,13 @@ const analysisPeriods = ref(null)
 
 async function openAnalysis() {
   showAnalysis.value = true; analysisLoading.value = true; analysisData.value = {}
-  analysisStreaks.value = null; analysisNextDate.value = ''
+  analysisStreaks.value = null; analysisNextDate.value = ''; backtestData.value = null
   try {
     const params = recYear.value ? `?year=${recYear.value}` : ''
-    const [res1, res2] = await Promise.all([
+    const [res1, res2, res3] = await Promise.all([
       fetch(`${API}/tail-analysis${params}`),
       apiFetch('/draw-analysis/streaks'),
+      fetch(`${API}/tail-backtest`),
     ])
     analysisData.value = await res1.json()
     analysisTable.value = analysisData.value.table || []
@@ -1727,6 +2357,9 @@ async function openAnalysis() {
     // streaks
     const sdata = await res2.json()
     if (!sdata.error) analysisStreaks.value = sdata
+    // backtest
+    const bdata = await res3.json()
+    if (!bdata.error) backtestData.value = bdata
   } catch (e) { analysisData.value = { error: e.message } }
   finally { analysisLoading.value = false }
 }
@@ -3926,4 +4559,77 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .tail-streak-len { color: #fbbf24; font-weight: 700; flex-shrink: 0; margin-right: 4px; }
 .tail-streak-count { color: #38bdf8; font-weight: 700; cursor: pointer; flex-shrink: 0; padding: 2px 8px; background: rgba(56,189,248,0.12); border-radius: 10px; font-size: 11px; }
 .tail-streak-count:hover { background: rgba(56,189,248,0.25); }
+
+/* ===== 最长跟踪演算 ===== */
+.tracking-run-card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  cursor: pointer;
+  transition: all .15s;
+  border-left: 3px solid #f59e0b;
+}
+.tracking-run-card:active { background: #f0f4f8; transform: scale(.98); }
+.tracking-stale-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 10px;
+  padding: 1px 7px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tracking-tab {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+}
+.tracking-tab.active {
+  background: #4da6ff;
+  border-color: #4da6ff;
+  color: #fff;
+}
+.tracking-stat {
+  flex: 1;
+  min-width: 90px;
+  background: #fff;
+  border-radius: 10px;
+  padding: 10px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.tracking-stat-value { font-size: 20px; font-weight: 800; line-height: 1.2; }
+.tracking-stat-label { font-size: 11px; color: #8899b0; margin-top: 4px; }
+.tracking-table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+.tracking-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 520px; }
+.tracking-table th {
+  background: #f8fafc;
+  color: #64748b;
+  font-weight: 700;
+  padding: 8px 6px;
+  text-align: center;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+.tracking-table td {
+  padding: 7px 6px;
+  text-align: center;
+  border-bottom: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+.tracking-table tbody tr:last-child td { border-bottom: none; }
+.tracking-row-win { background: rgba(52, 211, 153, 0.06); }
+.tracking-algo-name { text-align: left !important; font-weight: 600; color: #1a2a4a; white-space: normal !important; word-break: break-all; }
 </style>

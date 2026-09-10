@@ -11,6 +11,10 @@ from typing import Optional
 import sqlite3
 
 from auth import auth_router, AuthMiddleware, init_auth_db
+from tracking_engine import (
+    ALGORITHMS, load_records, load_count_value_map, run_backtest, build_report,
+    build_algorithm_doc, ALGO_CATEGORIES,
+)
 
 app = FastAPI(title="数字仓库轮换系统")
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "warehouse.db")
@@ -286,6 +290,48 @@ def init_db():
     try:
         db.execute("ALTER TABLE collection_threshold_numbers ADD COLUMN summary_name TEXT NOT NULL DEFAULT ''")
     except Exception: pass
+    # 最长跟踪演算表
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS tracking_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            min_n INTEGER NOT NULL DEFAULT 3,
+            max_n INTEGER NOT NULL DEFAULT 25,
+            warmup INTEGER NOT NULL DEFAULT 100,
+            total_records INTEGER NOT NULL DEFAULT 0,
+            date_from TEXT DEFAULT '',
+            date_to TEXT DEFAULT '',
+            status TEXT DEFAULT 'running',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    # 扩展列（2026-09-10）：years 日期范围 / algo_count 算法数 / updated_at 重算时间
+    for _col, _type, _dflt in (("years", "INTEGER", "2"), ("algo_count", "INTEGER", "50"), ("updated_at", "TEXT", "''")):
+        try:
+            db.execute(f"ALTER TABLE tracking_runs ADD COLUMN {_col} {_type} DEFAULT {_dflt}")
+        except Exception:
+            pass
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS tracking_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            algo_id INTEGER NOT NULL,
+            algo_name TEXT NOT NULL,
+            desc TEXT DEFAULT '',
+            n INTEGER NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0,
+            hit_rate REAL NOT NULL DEFAULT 0,
+            eq_pnl REAL NOT NULL DEFAULT 0,
+            eq_avg REAL NOT NULL DEFAULT 0,
+            eq_days_pos INTEGER NOT NULL DEFAULT 0,
+            eq_win_rate REAL NOT NULL DEFAULT 0,
+            bt_pnl REAL NOT NULL DEFAULT 0,
+            max_drawdown REAL NOT NULL DEFAULT 0,
+            UNIQUE(run_id, algo_id, n),
+            FOREIGN KEY (run_id) REFERENCES tracking_runs(id)
+        )
+    """)
     db.commit()
     db.close()
 
@@ -4804,6 +4850,39 @@ def get_threshold_results(date: str = None):
     return {"date": use_date, "items": items, "col19_summaries": col19_summaries}
 
 
+@app.get("/api/vote/stores")
+def get_vote_stores(date: str = None):
+    """返回可投票的门店列表（汇总店 + 集合14/16），按日期过滤有数据的门店"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        rec = db.execute("SELECT MAX(date) as dt FROM collection_threshold_numbers").fetchone()
+        date = rec["dt"] if rec and rec["dt"] else None
+    if not date:
+        db.close()
+        return {"ok": False, "error": "无阈值数据，请先在阈值tab执行「计算」"}
+
+    rows = db.execute(
+        "SELECT DISTINCT collection_id FROM collection_threshold_numbers WHERE date=? AND collection_id != 0 ORDER BY collection_id",
+        (date,)
+    ).fetchall()
+
+    stores = []
+    for r in rows:
+        cid = r["collection_id"]
+        if cid < 0:
+            sid = -cid
+            nr = db.execute("SELECT name FROM summaries WHERE id=?", (sid,)).fetchone()
+            stores.append({"id": sid, "name": nr["name"] if nr else f"汇总{sid}", "type": "summary"})
+        elif cid in (14, 16):
+            stores.append({"id": cid, "name": f"集合{cid}", "type": "collection"})
+
+    db.close()
+    stores.sort(key=lambda s: (s["type"] != "summary", s["id"]))
+    return {"ok": True, "date": date, "stores": stores}
+
+
 @app.get("/api/threshold/vote")
 def threshold_vote(date: str = None, stores: str = None, vote: int = 2, direction: str = "positive"):
     """多门店投票：统计各门店阈值号码的共识号码。
@@ -4915,11 +4994,18 @@ class StripPrefixMiddleware:
 
 # ═══════════════ 最长未出号码分析 ═══════════════
 @app.get("/api/missing-numbers")
-def get_missing_numbers():
-    """统计1-49每个号码的未出期数 + 历史最长间隔（按记录索引算，跨年正确）"""
+def get_missing_numbers(date: str = None):
+    """统计1-49每个号码的未出期数 + 历史最长间隔（按记录索引算，跨年正确）
+    可选 date 参数：截止到该日期（含）计算，而非最新记录"""
     db = get_db()
     db.row_factory = sqlite3.Row
-    rows = db.execute("SELECT date, draw_number FROM records ORDER BY date DESC").fetchall()
+    if date:
+        rows = db.execute(
+            "SELECT date, draw_number FROM records WHERE date <= ? ORDER BY date DESC",
+            (date,)
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT date, draw_number FROM records ORDER BY date DESC").fetchall()
     db.close()
 
     if not rows:
@@ -5096,6 +5182,40 @@ def get_tail_analysis(year: str = None):
     else:
         prediction = predict("0-4", low_current, low_longest)
 
+    # ===== 实证概率增强：当前连续k天 → 下期延续/反转的历史实证概率 =====
+    cur_group = "0-4" if low_current > 0 else "5-9"
+    cur_streak = low_current if low_current > 0 else high_current
+
+    def empirical_transition(data, target_group, k):
+        """统计 target_group 连续 k 天后，下一期延续/反转的实证次数"""
+        cont = 0; rev = 0
+        n = len(data)
+        for i in range(k, n):
+            ok = all(data[j]["group"] == target_group for j in range(i - k, i))
+            if not ok:
+                continue
+            if data[i]["group"] == target_group:
+                cont += 1
+            else:
+                rev += 1
+        return cont, rev
+
+    emp_cont, emp_rev = empirical_transition(daily, cur_group, cur_streak)
+    emp_total = emp_cont + emp_rev
+    cur_streaks = low_streaks if cur_group == "0-4" else high_streaks
+    emp_pct = sum(1 for s in cur_streaks if s <= cur_streak) / len(cur_streaks) if cur_streaks else 1.0
+
+    prediction["empirical"] = {
+        "group": cur_group,
+        "current_streak": cur_streak,
+        "continue_count": emp_cont,
+        "reverse_count": emp_rev,
+        "p_continue": round(emp_cont / emp_total * 100, 1) if emp_total else None,
+        "p_reverse": round(emp_rev / emp_total * 100, 1) if emp_total else None,
+        "percentile": round(emp_pct * 100, 1),
+        "samples": emp_total,
+    }
+
     # 最近30天表格（O(n)计算连续，然后倒序→新在上）
     recent = daily[-30:] if len(daily) > 30 else daily
     table_raw = []
@@ -5139,6 +5259,276 @@ def get_tail_analysis(year: str = None):
         "table": table,
         "latest_date": daily[-1]["date"] if daily else None,
     }
+
+
+# ═══════════════ 尾数预测回测框架 ═══════════════
+@app.get("/api/tail-backtest")
+def get_tail_backtest():
+    """回测多种尾数预测策略的历史命中率，对比随机基线（两分类 50%）"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT date, draw_number FROM records ORDER BY date").fetchall()
+    db.close()
+
+    if not rows:
+        return {"error": "无记录"}
+
+    groups = ["0-4" if (r["draw_number"] % 10) <= 4 else "5-9" for r in rows]
+    n = len(groups)
+
+    strategies = []
+
+    def add_strategy(name, preds):
+        hits = 0; total = 0
+        for i in range(1, n):
+            if preds[i] == groups[i]:
+                hits += 1
+            total += 1
+        strategies.append({
+            "name": name,
+            "hits": hits,
+            "total": total,
+            "rate": round(hits / total * 100, 2) if total else 0
+        })
+
+    add_strategy("始终猜 0-4尾", ["0-4"] * n)
+    add_strategy("始终猜 5-9尾", ["5-9"] * n)
+    add_strategy("延续策略(猜上期同组)", [groups[i - 1] if i > 0 else "0-4" for i in range(n)])
+    add_strategy("反转策略(猜上期反组)", [("5-9" if groups[i - 1] == "0-4" else "0-4") if i > 0 else "0-4" for i in range(n)])
+
+    # 按当前连续 k 分档的延续/反转命中率表
+    k_table = []
+    for target in ["0-4", "5-9"]:
+        for k in range(1, 10):
+            cont = 0; rev = 0
+            for i in range(k, n):
+                ok = all(groups[j] == target for j in range(i - k, i))
+                if not ok:
+                    continue
+                if groups[i] == target:
+                    cont += 1
+                else:
+                    rev += 1
+            if cont + rev >= 5:
+                k_table.append({
+                    "group": target,
+                    "k": k,
+                    "continue": cont,
+                    "reverse": rev,
+                    "p_continue": round(cont / (cont + rev) * 100, 1)
+                })
+
+    return {
+        "strategies": strategies,
+        "k_table": k_table,
+        "baseline": 50.0,
+        "total_records": n,
+        "latest_date": rows[-1]["date"],
+    }
+
+
+# ═══════════════ 最长跟踪演算 ═══════════════
+
+class TrackingRunRequest(BaseModel):
+    name: str = ""
+    min_n: int = 3
+    max_n: int = 25
+    warmup: int = 100
+    years: int = 2   # 日期范围：最近 N 年（0 = 全部历史）
+
+
+def _filter_records_by_years(dates, draws, years):
+    """按「最近 N 年」过滤记录，返回 (dates, draws)。years<=0 表示全部。"""
+    if not dates or years <= 0:
+        return dates, draws
+    max_date = dt_date.fromisoformat(dates[-1])
+    cutoff = (max_date - timedelta(days=years * 365)).isoformat()
+    idx = 0
+    for i, d in enumerate(dates):
+        if d >= cutoff:
+            idx = i
+            break
+    return dates[idx:], draws[idx:]
+
+
+def _run_backtest_to_db(run_id, min_n, max_n, warmup, years):
+    """执行回测并写入 tracking_results（供新建与重算共用）。返回 rows。"""
+    dates, draws = load_records()
+    count_map = load_count_value_map()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    dates, draws = _filter_records_by_years(dates, draws, years)
+    results = run_backtest(draws, dates, count_map, min_n, max_n, warmup)
+    rows = build_report(results, min_n, max_n)
+
+    db = get_db()
+    db.executemany(
+        "INSERT OR REPLACE INTO tracking_results "
+        "(run_id, algo_id, algo_name, desc, n, hits, total, hit_rate, eq_pnl, eq_avg, eq_days_pos, eq_win_rate, bt_pnl, max_drawdown) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(run_id, r["algo_id"], r["algo_name"], r["desc"], r["n"], r["hits"], r["total"],
+          r["hit_rate"], r["eq_pnl"], r["eq_avg"], r["eq_days_pos"], r["eq_win_rate"],
+          r["bt_pnl"], r["max_drawdown"]) for r in rows]
+    )
+    db.execute(
+        "UPDATE tracking_runs SET status='done', total_records=?, date_from=?, date_to=?, "
+        "algo_count=?, updated_at=datetime('now','localtime') WHERE id=?",
+        (len(draws), dates[0], dates[-1], len(ALGORITHMS), run_id)
+    )
+    db.commit()
+    db.close()
+    return rows
+
+
+@app.post("/api/longest-tracking/run")
+def run_longest_tracking(body: TrackingRunRequest):
+    """触发最长跟踪演算：67算法 × N(3~25) 回测，结果落库"""
+    min_n = max(1, min(body.min_n, body.max_n))
+    max_n = max(body.min_n, body.max_n)
+    warmup = max(10, body.warmup)
+    years = max(0, body.years)
+
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    dates, draws = _filter_records_by_years(dates, draws, years)
+
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    cur = db.execute(
+        "INSERT INTO tracking_runs (name, min_n, max_n, warmup, total_records, date_from, date_to, status, years) "
+        "VALUES (?,?,?,?,?,?,?, 'running', ?)",
+        (body.name, min_n, max_n, warmup, len(draws), dates[0], dates[-1], years)
+    )
+    db.commit()
+    run_id = cur.lastrowid
+    db.close()
+
+    rows = _run_backtest_to_db(run_id, min_n, max_n, warmup, years)
+
+    return {"ok": True, "run_id": run_id, "total_results": len(rows),
+            "eq_profitable": sum(1 for r in rows if r["eq_pnl"] > 0),
+            "bt_profitable": sum(1 for r in rows if r["bt_pnl"] > 0)}
+
+
+@app.get("/api/longest-tracking/runs")
+def list_longest_tracking_runs():
+    """历史演算记录列表"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    runs = db.execute(
+        "SELECT r.*, (SELECT COUNT(*) FROM tracking_results tr WHERE tr.run_id=r.id) as result_count, "
+        "(SELECT COUNT(*) FROM tracking_results tr WHERE tr.run_id=r.id AND tr.eq_pnl>0) as eq_profitable, "
+        "(SELECT COUNT(*) FROM tracking_results tr WHERE tr.run_id=r.id AND tr.bt_pnl>0) as bt_profitable "
+        "FROM tracking_runs r ORDER BY r.id DESC"
+    ).fetchall()
+    latest = db.execute("SELECT MAX(date) as d FROM records").fetchone()
+    db.close()
+    latest_date = latest["d"] if latest else ""
+
+    out = []
+    for r in runs:
+        d = dict(r)
+        # 有更新判定：最新记录日期 > 本次演算用到的最大日期（或算法数已变化）
+        stale = bool(latest_date and d.get("date_to") and latest_date > d["date_to"])
+        if not stale and d.get("algo_count") and d["algo_count"] != len(ALGORITHMS):
+            stale = True
+        d["is_stale"] = stale
+        out.append(d)
+    return {"runs": out, "latest_record_date": latest_date}
+
+
+@app.get("/api/longest-tracking/runs/{run_id}")
+def get_longest_tracking_run(run_id: int, sort_by: str = "eq_pnl", order: str = "desc"):
+    """单次演算详情：全部方案结果，支持排序"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    run = db.execute("SELECT * FROM tracking_runs WHERE id=?", (run_id,)).fetchone()
+    if not run:
+        db.close()
+        raise HTTPException(404, "演算记录不存在")
+
+    allowed_sort = {"eq_pnl", "bt_pnl", "hit_rate", "n", "algo_id", "max_drawdown", "eq_avg", "eq_win_rate"}
+    if sort_by not in allowed_sort:
+        sort_by = "eq_pnl"
+    direction = "DESC" if order != "asc" else "ASC"
+
+    results = db.execute(
+        f"SELECT * FROM tracking_results WHERE run_id=? ORDER BY {sort_by} {direction}, algo_id, n",
+        (run_id,)
+    ).fetchall()
+    db.close()
+
+    items = [dict(r) for r in results]
+
+    # 命中率基线（随机选 N 个号 = N/49）
+    baseline = {}
+    for n in sorted(set(x["n"] for x in items)):
+        baseline[n] = round(n / 49 * 100, 2)
+
+    run_d = dict(run)
+
+    return {
+        "run": run_d,
+        "results": items,
+        "baseline": baseline,
+        "algorithms": [{"id": a[0], "name": a[1], "desc": a[2]} for a in ALGORITHMS],
+        "is_stale": _run_is_stale(run_d),
+    }
+
+
+def _run_is_stale(run: dict) -> bool:
+    """判断演算是否「有更新」：最新记录日期超过演算日期范围，或算法数已变化。"""
+    db = get_db()
+    latest = db.execute("SELECT MAX(date) as d FROM records").fetchone()
+    db.close()
+    latest_date = latest["d"] if latest else ""
+    stale = bool(latest_date and run.get("date_to") and latest_date > run["date_to"])
+    if not stale and run.get("algo_count") and run["algo_count"] != len(ALGORITHMS):
+        stale = True
+    return stale
+
+
+@app.post("/api/longest-tracking/runs/{run_id}/recalc")
+def recalc_longest_tracking_run(run_id: int):
+    """手动演算：用该演算的既有参数 + 最新数据重新回测，就地更新结果。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    run = db.execute("SELECT * FROM tracking_runs WHERE id=?", (run_id,)).fetchone()
+    if not run:
+        db.close()
+        raise HTTPException(404, "演算记录不存在")
+    min_n = run["min_n"]
+    max_n = run["max_n"]
+    warmup = run["warmup"]
+    years = int(run["years"]) if run["years"] is not None else 2
+    db.close()
+
+    rows = _run_backtest_to_db(run_id, min_n, max_n, warmup, years)
+    return {"ok": True, "run_id": run_id, "total_results": len(rows),
+            "eq_profitable": sum(1 for r in rows if r["eq_pnl"] > 0),
+            "bt_profitable": sum(1 for r in rows if r["bt_pnl"] > 0)}
+
+
+@app.get("/api/longest-tracking/algorithms/doc")
+def get_algorithm_doc():
+    """算法文档：结构化分类 + 算法清单（供「算法文档」按钮展示）。"""
+    cats = []
+    for (lo, hi), cat, note in ALGO_CATEGORIES:
+        items = [{"id": a[0], "name": a[1], "desc": a[2]} for a in ALGORITHMS if lo <= a[0] <= hi]
+        cats.append({"category": cat, "note": note, "algorithms": items})
+    return {"algo_count": len(ALGORITHMS), "categories": cats,
+            "markdown": build_algorithm_doc()}
+
+
+@app.delete("/api/longest-tracking/runs/{run_id}")
+def delete_longest_tracking_run(run_id: int):
+    db = get_db()
+    db.execute("DELETE FROM tracking_results WHERE run_id=?", (run_id,))
+    db.execute("DELETE FROM tracking_runs WHERE id=?", (run_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
 
 
 # 认证中间件（在 StripPrefix 之前添加，使其在外层先剥离前缀）
