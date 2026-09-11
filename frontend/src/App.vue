@@ -315,9 +315,18 @@
             <span style="font-size:13px;color:#1a2a4a;font-weight:700">🎯 跟踪持有（冷号回补）</span>
           </div>
           <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+            <div style="display:flex;gap:4px">
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px"
+                      :style="holdSignal==='gap' ? 'background:#2d6be0;color:#fff;border-color:#2d6be0' : ''"
+                      @click="switchHoldSignal('gap')">遗漏期数</button>
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px"
+                      :style="holdSignal==='ratio' ? 'background:#2d6be0;color:#fff;border-color:#2d6be0' : ''"
+                      @click="switchHoldSignal('ratio')">遗漏比</button>
+            </div>
             <div style="display:flex;align-items:center;gap:6px">
-              <span style="font-size:12px;color:#64748b">进场阈值(遗漏期数)</span>
-              <input type="number" v-model.number="holdTheta" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="1">
+              <span style="font-size:12px;color:#64748b">{{ holdSignal === 'ratio' ? '进场阈值(遗漏比)' : '进场阈值(遗漏期数)' }}</span>
+              <input type="number" v-model.number="holdTheta" class="form-input" style="width:64px;padding:5px 8px;font-size:13px"
+                     :min="holdSignal==='ratio' ? 0.1 : 1" :step="holdSignal==='ratio' ? 0.1 : 1">
             </div>
             <div style="display:flex;align-items:center;gap:6px">
               <span style="font-size:12px;color:#64748b">跟踪期数 K</span>
@@ -349,6 +358,10 @@
                 <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdResult.avg_hit_delay }} 期</div>
                 <div class="tracking-stat-label">平均命中期</div>
               </div>
+            </div>
+            <div v-if="holdResult.equity_curve && holdResult.equity_curve.length > 1" style="margin-bottom:12px">
+              <div style="font-size:12px;color:#64748b;margin-bottom:6px">资金曲线（等额口径，最大回撤 {{ holdResult.max_drawdown }}）</div>
+              <canvas ref="equityCanvas" style="width:100%;height:120px;border:1px solid #e0e0e0;border-radius:8px"></canvas>
             </div>
             <div style="font-size:12px;color:#64748b;margin-bottom:6px">真样本外验证（前段 vs 后段，无重叠）</div>
             <div style="display:flex;gap:10px;margin-bottom:12px">
@@ -1719,7 +1732,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, nextTick } from 'vue'
 
 const API = '/number-warehouse/api'
 
@@ -2251,9 +2264,11 @@ const showAlgoDoc = ref(false)        // 算法文档弹窗
 const algoDoc = ref({ algo_count: 0, categories: [] })
 const holdTheta = ref(10)             // 跟踪持有：进场阈值（遗漏期数）
 const holdK = ref(12)                 // 跟踪持有：跟踪期数
+const holdSignal = ref('gap')         // 进场信号：gap(遗漏期数) / ratio(遗漏比)
 const holdResult = ref(null)          // 跟踪持有分析结果
 const holdLoading = ref(false)
 const holdLive = ref(null)            // 实盘纸面跟踪（当前最冷号 + 最近轨迹）
+const equityCanvas = ref(null)        // 资金曲线 Canvas
 
 async function openTracking() {
   showTracking.value = true
@@ -2388,7 +2403,7 @@ function openTrackingHold() {
 async function analyzeTrackingHold() {
   holdLoading.value = true
   try {
-    const res = await apiFetch(`/tracking-hold/analyze?theta=${holdTheta.value}&K=${holdK.value}`)
+    const res = await apiFetch(`/tracking-hold/analyze?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}`)
     holdResult.value = await res.json()
   } catch (e) {
     $notify('跟踪持有分析失败：' + e.message, true)
@@ -2399,12 +2414,63 @@ async function analyzeTrackingHold() {
 }
 async function loadHoldLive() {
   try {
-    const res = await apiFetch(`/tracking-hold/live?theta=${holdTheta.value}&K=${holdK.value}&tail=20`)
+    const res = await apiFetch(`/tracking-hold/live?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&tail=20`)
     holdLive.value = await res.json()
   } catch (e) {
     holdLive.value = null
   }
 }
+// 切换进场信号：自动调整阈值默认值
+function switchHoldSignal(s) {
+  if (holdSignal.value === s) return
+  holdSignal.value = s
+  holdTheta.value = s === 'ratio' ? 0.8 : 10
+  holdResult.value = null
+  holdLive.value = null
+  analyzeTrackingHold()
+}
+// 资金曲线 Canvas 绘制
+function drawEquityCurve(canvas, curve) {
+  if (!canvas || !curve || curve.length < 2) return
+  const ctx = canvas.getContext('2d')
+  const dpr = window.devicePixelRatio || 1
+  const W = canvas.clientWidth || 600
+  const H = canvas.clientHeight || 120
+  canvas.width = W * dpr
+  canvas.height = H * dpr
+  ctx.scale(dpr, dpr)
+  ctx.clearRect(0, 0, W, H)
+  const min = Math.min(...curve)
+  const max = Math.max(...curve)
+  const range = (max - min) || 1
+  const pad = 8
+  const x = i => pad + (W - pad * 2) * i / (curve.length - 1)
+  const y = v => H - pad - (H - pad * 2) * (v - min) / range
+  // 零轴
+  if (min < 0 && max > 0) {
+    const y0 = y(0)
+    ctx.strokeStyle = '#e0e0e0'
+    ctx.lineWidth = 1
+    ctx.beginPath(); ctx.moveTo(pad, y0); ctx.lineTo(W - pad, y0); ctx.stroke()
+  }
+  // 曲线
+  ctx.strokeStyle = curve[curve.length - 1] >= 0 ? '#0f9f45' : '#ef4444'
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  curve.forEach((v, i) => { i === 0 ? ctx.moveTo(x(i), y(v)) : ctx.lineTo(x(i), y(v)) })
+  ctx.stroke()
+  // 面积
+  ctx.fillStyle = 'rgba(15,159,69,0.08)'
+  ctx.beginPath()
+  ctx.moveTo(x(0), y(0)); curve.forEach((v, i) => ctx.lineTo(x(i), y(v)))
+  ctx.lineTo(x(curve.length - 1), y(0)); ctx.closePath(); ctx.fill()
+}
+// 分析结果变化后绘制资金曲线
+watch(holdResult, async (v) => {
+  if (!v || !v.equity_curve) return
+  await nextTick()
+  drawEquityCurve(equityCanvas.value, v.equity_curve)
+})
 
 const eqProfitCount = computed(() => {
   const r = trackingDetail.value.results

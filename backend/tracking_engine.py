@@ -346,15 +346,20 @@ def build_report(results, min_n, max_n):
     return rows
 
 
-def run_tracking_hold(draws, theta=10, K=12, warmup=100):
-    """跟踪持有回测：锁定最冷 1 号，gap≥theta 进场，跟踪 K 期直到命中/止损。
+def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_period=None):
+    """跟踪持有回测：锁定最冷 1 号，进场信号≥theta 时进场，跟踪 K 期直到命中/止损。
 
-    与 67 种「每期重选」算法不同，本模型抓住「冷号回补」的正确语义——
-    从最冷号进场起连续跟踪，命中即止盈，超 K 期止损。
+    signal="gap"：进场信号 = 遗漏期数（theta 默认 10，遗漏 ≥ theta 进场）。
+    signal="ratio"：进场信号 = 遗漏比 gap/历史最大遗漏（theta 默认 0.8，比例 ≥ theta 进场）。
+    遗漏比更稳健（不同号历史极限不同，归一化后可比）。
+
+    start_period：从第几期开始跟踪统计（默认 warmup）。gap 始终用完整历史（第 0 期累计），
+    用于真样本外验证：后段测试传 start_period=half，gap 含前段历史但只统计后段。
 
     返回 dict：rounds/wins/win_rate/baseline/edge/avg_hit_delay/total_pnl/avg_pnl/max_drawdown/equity_curve
     """
     M = len(draws)
+    start = start_period if start_period is not None else warmup
     freq = {n: 0 for n in range(1, 50)}
     maxgap = {n: 0 for n in range(1, 50)}
     last_seen_idx = {n: -1 for n in range(1, 50)}
@@ -368,8 +373,8 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100):
     tracking = None
     held = 0
 
-    # 预热：用前 warmup 期初始化遗漏统计（保证第 warmup 期的 gap 基于真实历史）
-    for t in range(min(warmup, M)):
+    # 阶段1：第 0..start-1 期，只维护遗漏统计（完整历史预热）
+    for t in range(min(start, M)):
         d = draws[t]
         freq[d] += 1
         if last_seen_idx[d] >= 0:
@@ -378,15 +383,20 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100):
                 maxgap[d] = g
         last_seen_idx[d] = t
 
-    for t in range(warmup, M):
+    for t in range(start, M):
         gap = {}
         for n in range(1, 50):
             ls = last_seen_idx[n]
             gap[n] = (t - ls) if ls >= 0 else t
 
         if tracking is None:
-            coldest = max(range(1, 50), key=lambda x: gap[x])
-            if gap[coldest] >= theta:
+            if signal == "ratio":
+                coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
+                sig_val = gap[coldest] / max(maxgap[coldest], 1)
+            else:
+                coldest = max(range(1, 50), key=lambda x: gap[x])
+                sig_val = gap[coldest]
+            if sig_val >= theta:
                 tracking = coldest
                 held = 0
             else:
@@ -428,7 +438,7 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100):
     win_rate = wins / rounds * 100 if rounds else 0
     baseline = (1 - (48 / 49) ** K) * 100
     return {
-        "theta": theta, "K": K,
+        "theta": theta, "K": K, "signal": signal,
         "rounds": rounds, "wins": wins,
         "win_rate": round(win_rate, 2),
         "baseline": round(baseline, 2),
@@ -441,31 +451,44 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100):
     }
 
 
-def tracking_hold_current(draws, theta=10):
+def tracking_hold_current(draws, theta=10, signal="gap"):
     """基于最新数据，计算当前最冷号 + 遗漏期数 + 是否建议进场。
 
-    返回 {coldest_num, coldest_gap, signal, top_cold}（top_cold = 最冷 5 号 + 遗漏）。
+    signal="gap"：按遗漏期数排序；signal="ratio"：按遗漏比(gap/历史最大遗漏)排序。
+    返回 {coldest_num, coldest_gap, coldest_ratio, signal(布尔), top_cold}。
     """
     M = len(draws)
     last_seen = {}
+    maxgap = {n: 0 for n in range(1, 50)}
     for t, d in enumerate(draws):
+        if d in last_seen:
+            g = t - last_seen[d] - 1
+            if g > maxgap[d]:
+                maxgap[d] = g
         last_seen[d] = t
     gaps = {}
+    ratios = {}
     for n in range(1, 50):
         ls = last_seen.get(n, -1)
         gaps[n] = (M - ls) if ls >= 0 else M
-    top_cold = sorted(gaps.items(), key=lambda x: -x[1])[:5]
-    coldest_num = top_cold[0][0]
-    coldest_gap = top_cold[0][1]
+        ratios[n] = gaps[n] / max(maxgap[n], 1)
+    if signal == "ratio":
+        ordered = sorted(range(1, 50), key=lambda x: -ratios[x])
+    else:
+        ordered = sorted(range(1, 50), key=lambda x: -gaps[x])
+    top_cold = [{"num": n, "gap": gaps[n], "ratio": round(ratios[n], 3)} for n in ordered[:5]]
+    coldest_num = ordered[0]
+    sig_val = ratios[coldest_num] if signal == "ratio" else gaps[coldest_num]
     return {
         "coldest_num": coldest_num,
-        "coldest_gap": coldest_gap,
-        "signal": coldest_gap >= theta,
-        "top_cold": [{"num": n, "gap": g} for n, g in top_cold],
+        "coldest_gap": gaps[coldest_num],
+        "coldest_ratio": round(ratios[coldest_num], 3),
+        "signal": sig_val >= theta,
+        "top_cold": top_cold,
     }
 
 
-def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30):
+def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"):
     """最近 tail 期的实盘模拟轨迹：逐期输出（跟踪号/命中/止损/累计盈亏），供前端展示。"""
     M = len(draws)
     # 复用 run_tracking_hold 的 walk-forward，但只记录最后 tail 期的轨迹
@@ -490,8 +513,13 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30):
         gap = {n: (t - last_seen_idx[n]) if last_seen_idx[n] >= 0 else t for n in range(1, 50)}
         event = None
         if tracking is None:
-            coldest = max(range(1, 50), key=lambda x: gap[x])
-            if gap[coldest] >= theta:
+            if signal == "ratio":
+                coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
+                sig_val = gap[coldest] / max(maxgap[coldest], 1)
+            else:
+                coldest = max(range(1, 50), key=lambda x: gap[x])
+                sig_val = gap[coldest]
+            if sig_val >= theta:
                 tracking = coldest
                 held = 0
         if tracking is not None:
