@@ -5533,10 +5533,10 @@ def delete_longest_tracking_run(run_id: int):
 
 
 @app.get("/api/tracking-hold/analyze")
-def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, years: int = 0, signal: str = "gap"):
+def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, years: int = 0, signal: str = "gap", min_votes: int = 4):
     """跟踪持有回测：锁定最冷 1 号，进场信号≥theta 时进场，跟踪 K 期直到命中/止损。
 
-    signal=gap（遗漏期数，theta 默认 10）/ ratio（遗漏比，theta 默认 0.8）。
+    signal=gap（遗漏期数，theta 默认 10）/ ratio（遗漏比，theta 默认 0.8）/ consensus（7度量投票，min_votes 默认 4）。
     返回命中率 vs 随机基线 + 真样本外（前段/后段）对比 + 资金曲线（抽样）。
     """
     dates, draws = load_records()
@@ -5544,7 +5544,7 @@ def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, yea
         raise HTTPException(400, "无记录")
     dates, draws = _filter_records_by_years(dates, draws, years)
 
-    result = run_tracking_hold(draws, theta=theta, K=K, warmup=warmup, signal=signal)
+    result = run_tracking_hold(draws, theta=theta, K=K, warmup=warmup, signal=signal, min_votes=min_votes)
     curve = result.pop("equity_curve", None)
     if curve:
         step = max(1, len(curve) // 200)
@@ -5556,8 +5556,8 @@ def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, yea
 
     # 真样本外验证（前段 / 后段，无重叠）：后段用完整历史算 gap、只从 half 开始统计
     half = len(draws) // 2
-    front = run_tracking_hold(draws[:half], theta=theta, K=K, warmup=warmup, signal=signal)
-    back = run_tracking_hold(draws, theta=theta, K=K, warmup=warmup, signal=signal, start_period=half)
+    front = run_tracking_hold(draws[:half], theta=theta, K=K, warmup=warmup, signal=signal, min_votes=min_votes)
+    back = run_tracking_hold(draws, theta=theta, K=K, warmup=warmup, signal=signal, start_period=half, min_votes=min_votes)
     result["oos"] = {
         "front": {"rounds": front["rounds"], "wins": front["wins"],
                   "win_rate": front["win_rate"], "baseline": front["baseline"],
@@ -5570,13 +5570,13 @@ def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, yea
 
 
 @app.get("/api/tracking-hold/live")
-def tracking_hold_live(theta: float = 10, K: int = 12, tail: int = 30, signal: str = "gap"):
+def tracking_hold_live(theta: float = 10, K: int = 12, tail: int = 30, signal: str = "gap", min_votes: int = 4):
     """实盘纸面跟踪：当前最冷号 + 是否建议进场 + 最近 tail 期实盘模拟轨迹。"""
     dates, draws = load_records()
     if not draws:
         raise HTTPException(400, "无记录")
-    current = tracking_hold_current(draws, theta=theta, signal=signal)
-    trail = tracking_hold_trail(draws, theta=theta, K=K, warmup=100, tail=tail, signal=signal)
+    current = tracking_hold_current(draws, theta=theta, signal=signal, min_votes=min_votes)
+    trail = tracking_hold_trail(draws, theta=theta, K=K, warmup=100, tail=tail, signal=signal, min_votes=min_votes)
     for item in trail:
         idx = item["date"]
         item["date"] = dates[idx] if 0 <= idx < len(dates) else None

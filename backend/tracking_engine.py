@@ -346,12 +346,12 @@ def build_report(results, min_n, max_n):
     return rows
 
 
-def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_period=None):
+def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_period=None, min_votes=4):
     """跟踪持有回测：锁定最冷 1 号，进场信号≥theta 时进场，跟踪 K 期直到命中/止损。
 
     signal="gap"：进场信号 = 遗漏期数（theta 默认 10，遗漏 ≥ theta 进场）。
     signal="ratio"：进场信号 = 遗漏比 gap/历史最大遗漏（theta 默认 0.8，比例 ≥ theta 进场）。
-    遗漏比更稳健（不同号历史极限不同，归一化后可比）。
+    signal="consensus"：7 度量投票取共识号（得票 ≥ min_votes 才进场，默认 4），更稳健。
 
     start_period：从第几期开始跟踪统计（默认 warmup）。gap 始终用完整历史（第 0 期累计），
     用于真样本外验证：后段测试传 start_period=half，gap 含前段历史但只统计后段。
@@ -363,6 +363,10 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_per
     freq = {n: 0 for n in range(1, 50)}
     maxgap = {n: 0 for n in range(1, 50)}
     last_seen_idx = {n: -1 for n in range(1, 50)}
+    tail_last = {t: -1 for t in range(10)}
+    zodiac_last = {z: -1 for z in set(ZODIAC.values())}
+    element_last = {e: -1 for e in set(ELEMENT.values())}
+    color_last = {c: -1 for c in set(COLOR.values())}
 
     rounds = wins = total_pnl = 0
     hit_delay_sum = 0
@@ -382,6 +386,10 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_per
             if g > maxgap[d]:
                 maxgap[d] = g
         last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
 
     for t in range(start, M):
         gap = {}
@@ -390,35 +398,56 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_per
             gap[n] = (t - ls) if ls >= 0 else t
 
         if tracking is None:
-            if signal == "ratio":
-                coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
-                sig_val = gap[coldest] / max(maxgap[coldest], 1)
+            if signal == "consensus":
+                tg = {x: (t - tail_last[x]) if tail_last[x] >= 0 else t for x in range(10)}
+                zg = {z: (t - zodiac_last[z]) if zodiac_last[z] >= 0 else t for z in zodiac_last}
+                eg = {e: (t - element_last[e]) if element_last[e] >= 0 else t for e in element_last}
+                cg = {c: (t - color_last[c]) if color_last[c] >= 0 else t for c in color_last}
+                ms = {
+                    "gap": lambda n: gap[n],
+                    "ratio": lambda n: gap[n] / max(maxgap[n], 1),
+                    "tail": lambda n: gap[n] + tg[TAIL[n]] * 3,
+                    "zodiac": lambda n: gap[n] + zg[ZODIAC[n]] * 3,
+                    "element": lambda n: gap[n] + eg[ELEMENT[n]] * 3,
+                    "color": lambda n: gap[n] + cg[COLOR[n]] * 3,
+                    "alldim": lambda n: gap[n] + tg[TAIL[n]] + zg[ZODIAC[n]] + eg[ELEMENT[n]],
+                }
+                votes = {}
+                for _name, _fn in ms.items():
+                    _c = max(range(1, 50), key=_fn)
+                    votes[_c] = votes.get(_c, 0) + 1
+                top = max(votes.values())
+                if top >= min_votes:
+                    tracking = max([n for n, c in votes.items() if c == top], key=lambda x: gap[x])
+                    held = 0
             else:
-                coldest = max(range(1, 50), key=lambda x: gap[x])
-                sig_val = gap[coldest]
-            if sig_val >= theta:
-                tracking = coldest
-                held = 0
-            else:
-                equity.append(cur_equity)
-                continue
+                if signal == "ratio":
+                    coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
+                    sig_val = gap[coldest] / max(maxgap[coldest], 1)
+                else:
+                    coldest = max(range(1, 50), key=lambda x: gap[x])
+                    sig_val = gap[coldest]
+                if sig_val >= theta:
+                    tracking = coldest
+                    held = 0
 
-        held += 1
-        actual = draws[t]
-        if actual == tracking:
-            rounds += 1
-            wins += 1
-            hit_delay_sum += held
-            pnl = 47 - held
-            total_pnl += pnl
-            cur_equity += pnl
-            tracking = None
-        elif held >= K:
-            rounds += 1
-            pnl = -K
-            total_pnl += pnl
-            cur_equity += pnl
-            tracking = None
+        if tracking is not None:
+            held += 1
+            actual = draws[t]
+            if actual == tracking:
+                rounds += 1
+                wins += 1
+                hit_delay_sum += held
+                pnl = 47 - held
+                total_pnl += pnl
+                cur_equity += pnl
+                tracking = None
+            elif held >= K:
+                rounds += 1
+                pnl = -K
+                total_pnl += pnl
+                cur_equity += pnl
+                tracking = None
 
         if cur_equity > max_equity:
             max_equity = cur_equity
@@ -434,6 +463,10 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_per
             if g > maxgap[d]:
                 maxgap[d] = g
         last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
 
     win_rate = wins / rounds * 100 if rounds else 0
     baseline = (1 - (48 / 49) ** K) * 100
@@ -451,7 +484,29 @@ def run_tracking_hold(draws, theta=10, K=12, warmup=100, signal="gap", start_per
     }
 
 
-def tracking_hold_current(draws, theta=10, signal="gap"):
+def _consensus_pick(gap, maxgap, tg, zg, eg, cg, min_votes=4):
+    """7 度量投票取共识号。返回 (共识号, 得票数)；得票不足返回 (None, top)。"""
+    ms = {
+        "gap": lambda n: gap[n],
+        "ratio": lambda n: gap[n] / max(maxgap[n], 1),
+        "tail": lambda n: gap[n] + tg[TAIL[n]] * 3,
+        "zodiac": lambda n: gap[n] + zg[ZODIAC[n]] * 3,
+        "element": lambda n: gap[n] + eg[ELEMENT[n]] * 3,
+        "color": lambda n: gap[n] + cg[COLOR[n]] * 3,
+        "alldim": lambda n: gap[n] + tg[TAIL[n]] + zg[ZODIAC[n]] + eg[ELEMENT[n]],
+    }
+    votes = {}
+    for _name, _fn in ms.items():
+        _c = max(range(1, 50), key=_fn)
+        votes[_c] = votes.get(_c, 0) + 1
+    top = max(votes.values())
+    if top >= min_votes:
+        num = max([n for n, c in votes.items() if c == top], key=lambda x: gap[x])
+        return num, top
+    return None, top
+
+
+def tracking_hold_current(draws, theta=10, signal="gap", min_votes=4):
     """基于最新数据，计算当前最冷号 + 遗漏期数 + 是否建议进场。
 
     signal="gap"：按遗漏期数排序；signal="ratio"：按遗漏比(gap/历史最大遗漏)排序。
@@ -460,18 +515,42 @@ def tracking_hold_current(draws, theta=10, signal="gap"):
     M = len(draws)
     last_seen = {}
     maxgap = {n: 0 for n in range(1, 50)}
+    tail_last = {t: -1 for t in range(10)}
+    zodiac_last = {z: -1 for z in set(ZODIAC.values())}
+    element_last = {e: -1 for e in set(ELEMENT.values())}
+    color_last = {c: -1 for c in set(COLOR.values())}
     for t, d in enumerate(draws):
         if d in last_seen:
             g = t - last_seen[d] - 1
             if g > maxgap[d]:
                 maxgap[d] = g
         last_seen[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
     gaps = {}
     ratios = {}
     for n in range(1, 50):
         ls = last_seen.get(n, -1)
         gaps[n] = (M - ls) if ls >= 0 else M
         ratios[n] = gaps[n] / max(maxgap[n], 1)
+    tg = {x: (M - tail_last[x]) if tail_last[x] >= 0 else M for x in range(10)}
+    zg = {z: (M - zodiac_last[z]) if zodiac_last[z] >= 0 else M for z in zodiac_last}
+    eg = {e: (M - element_last[e]) if element_last[e] >= 0 else M for e in element_last}
+    cg = {c: (M - color_last[c]) if color_last[c] >= 0 else M for c in color_last}
+    if signal == "consensus":
+        num, top = _consensus_pick(gaps, maxgap, tg, zg, eg, cg, min_votes)
+        return {
+            "coldest_num": num,
+            "coldest_gap": gaps[num] if num else None,
+            "coldest_ratio": round(ratios[num], 3) if num else None,
+            "signal": num is not None,
+            "votes": top,
+            "min_votes": min_votes,
+            "top_cold": [{"num": n, "gap": gaps[n], "ratio": round(ratios[n], 3)}
+                         for n in sorted(range(1, 50), key=lambda x: -gaps[x])[:5]],
+        }
     if signal == "ratio":
         ordered = sorted(range(1, 50), key=lambda x: -ratios[x])
     else:
@@ -488,13 +567,17 @@ def tracking_hold_current(draws, theta=10, signal="gap"):
     }
 
 
-def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"):
+def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap", min_votes=4):
     """最近 tail 期的实盘模拟轨迹：逐期输出（跟踪号/命中/止损/累计盈亏），供前端展示。"""
     M = len(draws)
     # 复用 run_tracking_hold 的 walk-forward，但只记录最后 tail 期的轨迹
     freq = {n: 0 for n in range(1, 50)}
     maxgap = {n: 0 for n in range(1, 50)}
     last_seen_idx = {n: -1 for n in range(1, 50)}
+    tail_last = {t: -1 for t in range(10)}
+    zodiac_last = {z: -1 for z in set(ZODIAC.values())}
+    element_last = {e: -1 for e in set(ELEMENT.values())}
+    color_last = {c: -1 for c in set(COLOR.values())}
     for t in range(min(warmup, M)):
         d = draws[t]
         freq[d] += 1
@@ -503,6 +586,10 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"
             if g > maxgap[d]:
                 maxgap[d] = g
         last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
 
     tracking = None
     held = 0
@@ -513,15 +600,27 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"
         gap = {n: (t - last_seen_idx[n]) if last_seen_idx[n] >= 0 else t for n in range(1, 50)}
         event = None
         if tracking is None:
-            if signal == "ratio":
+            if signal == "consensus":
+                tg = {x: (t - tail_last[x]) if tail_last[x] >= 0 else t for x in range(10)}
+                zg = {z: (t - zodiac_last[z]) if zodiac_last[z] >= 0 else t for z in zodiac_last}
+                eg = {e: (t - element_last[e]) if element_last[e] >= 0 else t for e in element_last}
+                cg = {c: (t - color_last[c]) if color_last[c] >= 0 else t for c in color_last}
+                num, top = _consensus_pick(gap, maxgap, tg, zg, eg, cg, min_votes)
+                if num is not None:
+                    tracking = num
+                    held = 0
+            elif signal == "ratio":
                 coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
                 sig_val = gap[coldest] / max(maxgap[coldest], 1)
+                if sig_val >= theta:
+                    tracking = coldest
+                    held = 0
             else:
                 coldest = max(range(1, 50), key=lambda x: gap[x])
                 sig_val = gap[coldest]
-            if sig_val >= theta:
-                tracking = coldest
-                held = 0
+                if sig_val >= theta:
+                    tracking = coldest
+                    held = 0
         if tracking is not None:
             held += 1
             actual = draws[t]
@@ -547,6 +646,10 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"
             if g > maxgap[d]:
                 maxgap[d] = g
         last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
     return trail
 
 

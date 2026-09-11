@@ -322,11 +322,18 @@
               <button class="btn-cancel" style="font-size:12px;padding:4px 10px"
                       :style="holdSignal==='ratio' ? 'background:#2d6be0;color:#fff;border-color:#2d6be0' : ''"
                       @click="switchHoldSignal('ratio')">遗漏比</button>
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px"
+                      :style="holdSignal==='consensus' ? 'background:#2d6be0;color:#fff;border-color:#2d6be0' : ''"
+                      @click="switchHoldSignal('consensus')">共识投票</button>
             </div>
-            <div style="display:flex;align-items:center;gap:6px">
+            <div v-if="holdSignal !== 'consensus'" style="display:flex;align-items:center;gap:6px">
               <span style="font-size:12px;color:#64748b">{{ holdSignal === 'ratio' ? '进场阈值(遗漏比)' : '进场阈值(遗漏期数)' }}</span>
               <input type="number" v-model.number="holdTheta" class="form-input" style="width:64px;padding:5px 8px;font-size:13px"
                      :min="holdSignal==='ratio' ? 0.1 : 1" :step="holdSignal==='ratio' ? 0.1 : 1">
+            </div>
+            <div v-else style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">最少得票数</span>
+              <input type="number" v-model.number="holdMinVotes" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="2" max="7">
             </div>
             <div style="display:flex;align-items:center;gap:6px">
               <span style="font-size:12px;color:#64748b">跟踪期数 K</span>
@@ -2264,7 +2271,8 @@ const showAlgoDoc = ref(false)        // 算法文档弹窗
 const algoDoc = ref({ algo_count: 0, categories: [] })
 const holdTheta = ref(10)             // 跟踪持有：进场阈值（遗漏期数）
 const holdK = ref(12)                 // 跟踪持有：跟踪期数
-const holdSignal = ref('gap')         // 进场信号：gap(遗漏期数) / ratio(遗漏比)
+const holdSignal = ref('gap')         // 进场信号：gap(遗漏期数) / ratio(遗漏比) / consensus(共识投票)
+const holdMinVotes = ref(4)           // 共识投票：最少得票数
 const holdResult = ref(null)          // 跟踪持有分析结果
 const holdLoading = ref(false)
 const holdLive = ref(null)            // 实盘纸面跟踪（当前最冷号 + 最近轨迹）
@@ -2403,7 +2411,7 @@ function openTrackingHold() {
 async function analyzeTrackingHold() {
   holdLoading.value = true
   try {
-    const res = await apiFetch(`/tracking-hold/analyze?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}`)
+    const res = await apiFetch(`/tracking-hold/analyze?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&min_votes=${holdMinVotes.value}`)
     holdResult.value = await res.json()
   } catch (e) {
     $notify('跟踪持有分析失败：' + e.message, true)
@@ -2414,7 +2422,7 @@ async function analyzeTrackingHold() {
 }
 async function loadHoldLive() {
   try {
-    const res = await apiFetch(`/tracking-hold/live?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&tail=20`)
+    const res = await apiFetch(`/tracking-hold/live?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&min_votes=${holdMinVotes.value}&tail=20`)
     holdLive.value = await res.json()
   } catch (e) {
     holdLive.value = null
@@ -2424,7 +2432,8 @@ async function loadHoldLive() {
 function switchHoldSignal(s) {
   if (holdSignal.value === s) return
   holdSignal.value = s
-  holdTheta.value = s === 'ratio' ? 0.8 : 10
+  if (s === 'ratio') holdTheta.value = 0.8
+  else if (s === 'gap') holdTheta.value = 10
   holdResult.value = null
   holdLive.value = null
   analyzeTrackingHold()
