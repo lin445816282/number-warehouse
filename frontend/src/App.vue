@@ -66,7 +66,7 @@
 
       <!-- 新增/编辑弹窗 -->
       <div v-if="showForm" class="form-overlay" @click.self="showForm=false">
-        <div class="form-card">
+        <div class="form-card" style="max-width:340px">
           <div class="form-title">{{ editingId ? '编辑记录' : '新增记录' }}</div>
           <div class="form-fields">
             <label>日期</label>
@@ -435,17 +435,21 @@
                 {{ holdRounds.health.ratio >= 1 ? '· 信号偏强' : '· 信号偏弱/衰减' }}
               </span>
             </div>
-            <div v-if="holdRounds.rolling && holdRounds.rolling.length" style="font-size:11px;color:#94a3b8;line-height:1.9;margin-bottom:8px">
-              <div style="color:#64748b;margin-bottom:2px">滚动验证（每200期一段命中率，绿赚红亏）：</div>
-              <span v-for="(s, i) in holdRounds.rolling" :key="i" style="margin-right:7px">
-                <span :style="{color: s.pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ s.start.slice(0,4) }}·{{ s.hit_rate }}%</span>
-              </span>
+            <div v-if="holdRounds.rolling && holdRounds.rolling.length" style="font-size:11px;color:#94a3b8;margin-bottom:8px">
+              <div style="color:#64748b;margin-bottom:4px">滚动验证（每200期一段命中率，绿赚红亏）：</div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:4px">
+                <div v-for="(s, i) in holdRounds.rolling" :key="i" style="padding:4px 6px;border-radius:6px;text-align:center"
+                     :style="{background: s.pnl >= 0 ? 'rgba(15,159,69,0.08)' : 'rgba(239,68,68,0.08)'}">
+                  <div :style="{color: s.pnl >= 0 ? '#0f9f45' : '#ef4444', fontWeight:700}">{{ s.start.slice(0,4) }}</div>
+                  <div style="color:#64748b">{{ s.hit_rate }}%</div>
+                </div>
+              </div>
             </div>
             <div style="font-size:11px;color:#94a3b8;line-height:1.8;max-height:150px;overflow-y:auto">
-              <div v-for="(r, i) in holdRounds.rounds.slice(-12).reverse()" :key="i" style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px dashed #f0f0f0;gap:6px">
-                <span style="color:#64748b">{{ r.enter_date }} 进 {{ pad2(r.num) }}</span>
-                <span style="color:#94a3b8">遗漏{{ r.enter_gap }}·跟踪{{ r.held }}期</span>
-                <span :style="{color: r.result==='hit' ? '#0f9f45' : '#ef4444', flex:'0 0 auto'}">{{ r.result==='hit' ? '✅' : '⛔' }}{{ r.pnl > 0 ? '+' : '' }}{{ r.pnl }}</span>
+              <div v-for="(r, i) in holdRounds.rounds.slice(-12).reverse()" :key="i" style="display:flex;align-items:center;padding:3px 0;border-bottom:1px dashed #f0f0f0;gap:8px">
+                <span style="color:#64748b;flex:0 0 auto;white-space:nowrap">{{ r.enter_date.slice(5) }} 进{{ pad2(r.num) }}</span>
+                <span style="color:#94a3b8;flex:1 1 auto;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">遗{{ r.enter_gap }}·跟{{ r.held }}期</span>
+                <span :style="{color: r.result==='hit' ? '#0f9f45' : '#ef4444', flex:'0 0 auto', whiteSpace:'nowrap'}">{{ r.result==='hit' ? '✅' : '⛔' }}{{ r.pnl > 0 ? '+' : '' }}{{ r.pnl }}</span>
               </div>
             </div>
           </div>
@@ -4304,11 +4308,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 /* 弹窗 */
 .form-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100;
-  display: flex; align-items: safe center; justify-content: center;
-  padding: 40px 0; overflow-y: auto;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 40px 12px; overflow-y: auto;
 }
 .form-card {
-  width: 300px; background: #fff; border-radius: 16px; padding: 24px 20px 20px;
+  width: min(92vw, 640px); background: #fff; border-radius: 16px; padding: 24px 20px 20px;
   box-shadow: 0 8px 40px rgba(0,0,0,.15); max-height: calc(100vh - 80px);
   overflow-y: auto; margin: auto;
 }
