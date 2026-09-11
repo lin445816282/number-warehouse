@@ -533,6 +533,20 @@
             <button :class="['tracking-tab', {active: trackingSortBy==='bt_pnl'}]" @click="switchTrackingSort('bt_pnl')">📈 倍投口径</button>
           </div>
 
+          <!-- 下单方式说明 -->
+          <div style="margin-bottom:12px;padding:10px 12px;background:#f0f7ff;border-left:3px solid #3b82f6;border-radius:8px;font-size:12px;line-height:1.8;color:#1e3a5f">
+            <div v-if="trackingSortBy === 'eq_pnl'">
+              <b>💰 等额下单</b>：每期对选中的 <b>N 个号</b>，每号<b>固定下注 1 元</b>（共 N 元）。
+              命中 → 赚 <b>47 元</b>（47 倍赔率）净赚 <b>47−N</b> 元；未中 → 亏 <b>N</b> 元。
+            </div>
+            <div v-else>
+              <b>📈 倍投下单</b>：每期按各号当前<b>遗漏期数</b>查表下注，遗漏越久下注越多
+              （遗漏 4 期 → 25 元，5 期 → 30 元，… 25 期 → 257 元）。
+              命中 → 赚 <b>该号下注额 × 47 倍</b>；未中 → 亏全部投入。
+              <span style="color:#b45309">⚠️ 投入随遗漏指数放大，是杠杆假象，非真实收益率。</span>
+            </div>
+          </div>
+
           <!-- 摘要 -->
           <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap" v-if="trackingDetail.results">
             <div class="tracking-stat">
