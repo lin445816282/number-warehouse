@@ -14,7 +14,7 @@ from auth import auth_router, AuthMiddleware, init_auth_db
 from tracking_engine import (
     ALGORITHMS, load_records, load_count_value_map, run_backtest, build_report,
     build_algorithm_doc, ALGO_CATEGORIES, run_tracking_hold,
-    tracking_hold_current, tracking_hold_trail,
+    tracking_hold_current, tracking_hold_trail, tracking_hold_rounds,
 )
 
 app = FastAPI(title="数字仓库轮换系统")
@@ -5584,6 +5584,40 @@ def tracking_hold_live(theta: float = 10, K: int = 12, tail: int = 30, signal: s
         "current": current,
         "latest_record_date": dates[-1],
         "trail": trail,
+    }
+
+
+@app.get("/api/tracking-hold/rounds")
+def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap", min_votes: int = 4):
+    """实盘纸面跟踪：完整历史的每轮明细 + 汇总 + 近期实盘验证（最近 30 轮）。"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    rounds = tracking_hold_rounds(draws, theta=theta, K=K, signal=signal, min_votes=min_votes)
+    for r in rounds:
+        r["enter_date"] = dates[r["enter_idx"]] if r["enter_idx"] < len(dates) else None
+        r["end_date"] = dates[r["end_idx"]] if r["end_idx"] < len(dates) else None
+        r.pop("enter_idx", None)
+        r.pop("end_idx", None)
+    total = len(rounds)
+    hits = sum(1 for r in rounds if r["result"] == "hit")
+    total_pnl = sum(r["pnl"] for r in rounds)
+    recent = rounds[-30:] if len(rounds) > 30 else rounds
+    recent_hits = sum(1 for r in recent if r["result"] == "hit")
+    recent_pnl = sum(r["pnl"] for r in recent)
+    return {
+        "rounds": rounds,
+        "summary": {
+            "total": total, "hits": hits,
+            "hit_rate": round(hits / total * 100, 2) if total else 0,
+            "total_pnl": total_pnl,
+            "avg_pnl": round(total_pnl / total, 3) if total else 0,
+        },
+        "recent": {
+            "total": len(recent), "hits": recent_hits,
+            "hit_rate": round(recent_hits / len(recent) * 100, 2) if recent else 0,
+            "total_pnl": recent_pnl,
+        },
     }
 
 

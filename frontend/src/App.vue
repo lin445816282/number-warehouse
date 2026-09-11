@@ -411,6 +411,32 @@
               </span>
             </div>
           </div>
+
+          <!-- 实盘逐轮明细 -->
+          <div v-if="holdRounds" style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
+            <div style="font-size:12px;color:#64748b;margin-bottom:8px">📋 实盘逐轮明细（共 {{ holdRounds.summary.total }} 轮）</div>
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdRounds.summary.hit_rate }}%</div>
+                <div class="tracking-stat-label">总命中率（{{ holdRounds.summary.hits }}/{{ holdRounds.summary.total }}）</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" :style="{color: holdRounds.summary.total_pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ holdRounds.summary.total_pnl }}</div>
+                <div class="tracking-stat-label">总盈亏</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" :style="{color: holdRounds.recent.total_pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ holdRounds.recent.hit_rate }}% / {{ holdRounds.recent.total_pnl }}</div>
+                <div class="tracking-stat-label">近30轮（命中率/盈亏）</div>
+              </div>
+            </div>
+            <div style="font-size:11px;color:#94a3b8;line-height:1.8;max-height:150px;overflow-y:auto">
+              <div v-for="(r, i) in holdRounds.rounds.slice(-12).reverse()" :key="i" style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px dashed #f0f0f0;gap:6px">
+                <span style="color:#64748b">{{ r.enter_date }} 进 {{ pad2(r.num) }}</span>
+                <span style="color:#94a3b8">遗漏{{ r.enter_gap }}·跟踪{{ r.held }}期</span>
+                <span :style="{color: r.result==='hit' ? '#0f9f45' : '#ef4444', flex:'0 0 auto'}">{{ r.result==='hit' ? '✅' : '⛔' }}{{ r.pnl > 0 ? '+' : '' }}{{ r.pnl }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 新建演算 -->
@@ -2276,6 +2302,7 @@ const holdMinVotes = ref(4)           // 共识投票：最少得票数
 const holdResult = ref(null)          // 跟踪持有分析结果
 const holdLoading = ref(false)
 const holdLive = ref(null)            // 实盘纸面跟踪（当前最冷号 + 最近轨迹）
+const holdRounds = ref(null)          // 实盘逐轮明细 + 汇总
 const equityCanvas = ref(null)        // 资金曲线 Canvas
 
 async function openTracking() {
@@ -2419,6 +2446,7 @@ async function analyzeTrackingHold() {
     holdLoading.value = false
   }
   loadHoldLive()
+  loadHoldRounds()
 }
 async function loadHoldLive() {
   try {
@@ -2426,6 +2454,14 @@ async function loadHoldLive() {
     holdLive.value = await res.json()
   } catch (e) {
     holdLive.value = null
+  }
+}
+async function loadHoldRounds() {
+  try {
+    const res = await apiFetch(`/tracking-hold/rounds?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&min_votes=${holdMinVotes.value}`)
+    holdRounds.value = await res.json()
+  } catch (e) {
+    holdRounds.value = null
   }
 }
 // 切换进场信号：自动调整阈值默认值

@@ -653,6 +653,95 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"
     return trail
 
 
+def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_votes=4):
+    """完整历史的每轮跟踪明细（实盘纸面跟踪）。
+
+    返回 [{num, enter_idx, enter_gap, held, result, pnl, end_idx}]，按进场时间排序。
+    result = "hit"（命中，pnl=47-held）/"stop"（止损，pnl=-K）。
+    """
+    M = len(draws)
+    freq = {n: 0 for n in range(1, 50)}
+    maxgap = {n: 0 for n in range(1, 50)}
+    last_seen_idx = {n: -1 for n in range(1, 50)}
+    tail_last = {t: -1 for t in range(10)}
+    zodiac_last = {z: -1 for z in set(ZODIAC.values())}
+    element_last = {e: -1 for e in set(ELEMENT.values())}
+    color_last = {c: -1 for c in set(COLOR.values())}
+    for t in range(min(warmup, M)):
+        d = draws[t]
+        freq[d] += 1
+        if last_seen_idx[d] >= 0:
+            g = t - last_seen_idx[d] - 1
+            if g > maxgap[d]:
+                maxgap[d] = g
+        last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
+
+    rounds = []
+    tracking = None
+    held = 0
+    enter_idx = None
+    enter_gap = None
+    for t in range(warmup, M):
+        gap = {n: (t - last_seen_idx[n]) if last_seen_idx[n] >= 0 else t for n in range(1, 50)}
+        if tracking is None:
+            if signal == "consensus":
+                tg = {x: (t - tail_last[x]) if tail_last[x] >= 0 else t for x in range(10)}
+                zg = {z: (t - zodiac_last[z]) if zodiac_last[z] >= 0 else t for z in zodiac_last}
+                eg = {e: (t - element_last[e]) if element_last[e] >= 0 else t for e in element_last}
+                cg = {c: (t - color_last[c]) if color_last[c] >= 0 else t for c in color_last}
+                num, top = _consensus_pick(gap, maxgap, tg, zg, eg, cg, min_votes)
+                if num is not None:
+                    tracking = num
+                    held = 0
+                    enter_idx = t
+                    enter_gap = gap[num]
+            elif signal == "ratio":
+                coldest = max(range(1, 50), key=lambda x: gap[x] / max(maxgap[x], 1))
+                sig_val = gap[coldest] / max(maxgap[coldest], 1)
+                if sig_val >= theta:
+                    tracking = coldest
+                    held = 0
+                    enter_idx = t
+                    enter_gap = gap[coldest]
+            else:
+                coldest = max(range(1, 50), key=lambda x: gap[x])
+                sig_val = gap[coldest]
+                if sig_val >= theta:
+                    tracking = coldest
+                    held = 0
+                    enter_idx = t
+                    enter_gap = gap[coldest]
+        if tracking is not None:
+            held += 1
+            actual = draws[t]
+            if actual == tracking:
+                pnl = 47 - held
+                rounds.append({"num": tracking, "enter_idx": enter_idx, "enter_gap": enter_gap,
+                               "held": held, "result": "hit", "pnl": pnl, "end_idx": t})
+                tracking = None
+            elif held >= K:
+                pnl = -K
+                rounds.append({"num": tracking, "enter_idx": enter_idx, "enter_gap": enter_gap,
+                               "held": held, "result": "stop", "pnl": pnl, "end_idx": t})
+                tracking = None
+        d = draws[t]
+        freq[d] += 1
+        if last_seen_idx[d] >= 0:
+            g = t - last_seen_idx[d] - 1
+            if g > maxgap[d]:
+                maxgap[d] = g
+        last_seen_idx[d] = t
+        tail_last[TAIL[d]] = t
+        zodiac_last[ZODIAC[d]] = t
+        element_last[ELEMENT[d]] = t
+        color_last[COLOR[d]] = t
+    return rounds
+
+
 # ── 算法文档 ──
 # 分类映射：algo_id 区间 → (类别名, 说明)
 ALGO_CATEGORIES = [
