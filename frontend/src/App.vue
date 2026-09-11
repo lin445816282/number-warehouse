@@ -379,6 +379,19 @@
                 <div class="tracking-stat-label">平均命中期</div>
               </div>
             </div>
+
+            <!-- 盈利门槛（盈亏平衡 + 凯利仓位 + 连亏风控） -->
+            <div v-if="holdResult.metrics" style="margin-bottom:12px;padding:10px 12px;background:#fefce8;border-left:3px solid #eab308;border-radius:8px;font-size:12px;line-height:1.9;color:#713f12">
+              <div style="font-weight:700;margin-bottom:2px">🎯 盈利门槛（能否持续盈利的判据）</div>
+              <div>
+                盈亏平衡命中率 <b>{{ holdResult.metrics.breakeven }}%</b> vs 实际 <b :style="{color: holdResult.win_rate > holdResult.metrics.breakeven ? '#0f9f45' : '#ef4444'}">{{ holdResult.win_rate }}%</b>
+                <span v-if="holdResult.win_rate > holdResult.metrics.breakeven" style="color:#0f9f45">· 越过门槛 ✅</span>
+                <span v-else style="color:#ef4444">· 未越门槛 ⚠️ 信号失效时长期不赚</span>
+              </div>
+              <div>凯利建议仓位 <b>{{ (holdResult.metrics.kelly * 100).toFixed(1) }}%</b>（单轮期望 {{ holdResult.metrics.mu }} 元，平均命中 {{ holdResult.metrics.d_bar }} 期）</div>
+              <div>实测最长连亏 <b style="color:#dc2626">{{ holdResult.metrics.max_loss_streak }}</b> 轮 —— 风控底线，仓位必须能扛住它</div>
+            </div>
+
             <div v-if="holdResult.equity_curve && holdResult.equity_curve.length > 1" style="margin-bottom:12px">
               <div style="font-size:12px;color:#64748b;margin-bottom:6px">资金曲线（等额口径，最大回撤 {{ holdResult.max_drawdown }}）</div>
               <canvas ref="equityCanvas" style="width:100%;height:120px;border:1px solid #e0e0e0;border-radius:8px"></canvas>

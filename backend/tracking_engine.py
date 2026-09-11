@@ -742,6 +742,39 @@ def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_vo
     return rounds
 
 
+def tracking_hold_metrics(rounds, K):
+    """跟踪持有的「盈利门槛」指标：盈亏平衡命中率 + 凯利仓位 + 最长连亏。
+
+    rounds: tracking_hold_rounds 的返回（每轮 {result, held, pnl}）。
+    盈亏平衡命中率 p = K/(47+K-d̄)，d̄ = 平均命中延迟（命中轮已投入期数）。
+    凯利仓位 = 单轮回报率期望 / 方差（单轮最大投入按 K 计，保守口径）。
+    """
+    if not rounds:
+        return {"breakeven": None, "kelly": None, "max_loss_streak": 0, "d_bar": None, "mu": 0.0}
+    n = len(rounds)
+    hits = [r for r in rounds if r["result"] == "hit"]
+    pnls = [r["pnl"] for r in rounds]
+    mu = sum(pnls) / n
+    var = sum((x - mu) ** 2 for x in pnls) / n
+    d_bar = sum(r["held"] for r in hits) / len(hits) if hits else None
+    breakeven = K / (47 + K - d_bar) * 100 if d_bar else None
+    kelly = (mu / K) / (var / (K * K)) if var > 0 else None
+    max_loss_streak = cur = 0
+    for r in rounds:
+        if r["pnl"] < 0:
+            cur += 1
+            max_loss_streak = max(max_loss_streak, cur)
+        else:
+            cur = 0
+    return {
+        "breakeven": round(breakeven, 2) if breakeven is not None else None,
+        "kelly": round(kelly, 4) if kelly is not None else None,
+        "max_loss_streak": max_loss_streak,
+        "d_bar": round(d_bar, 2) if d_bar is not None else None,
+        "mu": round(mu, 3),
+    }
+
+
 # ── 算法文档 ──
 # 分类映射：algo_id 区间 → (类别名, 说明)
 ALGO_CATEGORIES = [

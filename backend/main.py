@@ -15,6 +15,7 @@ from tracking_engine import (
     ALGORITHMS, load_records, load_count_value_map, run_backtest, build_report,
     build_algorithm_doc, ALGO_CATEGORIES, run_tracking_hold,
     tracking_hold_current, tracking_hold_trail, tracking_hold_rounds,
+    tracking_hold_metrics,
 )
 
 app = FastAPI(title="数字仓库轮换系统")
@@ -5566,6 +5567,10 @@ def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, yea
                  "win_rate": back["win_rate"], "baseline": back["baseline"],
                  "total_pnl": back["total_pnl"]},
     }
+
+    # 盈利门槛指标：盈亏平衡命中率 + 凯利仓位 + 最长连亏
+    _rounds = tracking_hold_rounds(draws, theta=theta, K=K, signal=signal, min_votes=min_votes)
+    result["metrics"] = tracking_hold_metrics(_rounds, K)
     return result
 
 
@@ -5644,6 +5649,7 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
         },
         "rolling": rolling,
         "health": {"recent20_rate": round(recent20_rate, 2), "full_rate": round(full_rate, 2), "ratio": health},
+        "metrics": tracking_hold_metrics(rounds, K),
     }
 
 
