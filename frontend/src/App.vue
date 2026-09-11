@@ -23,7 +23,7 @@
     <div v-if="view === 'records'" class="records-view">
       <div class="rec-header">
         <span class="rec-title">📋 记录</span>
-        <div style="display:flex;gap:6px">
+        <div class="rec-header-actions">
           <button class="rec-btn-analysis" @click="openAnalysis()">📊 分析</button>
           <button class="rec-btn-analysis" @click="openMissingNumbers()">🔢 最长号码</button>
           <button class="rec-btn-analysis" @click="openTracking()">🎯 最长跟踪</button>
@@ -34,6 +34,19 @@
           <button class="btn-add" @click="openAdd">+ 新增</button>
         </div>
       </div>
+
+      <!-- 可拖动悬浮新增按钮（记录页） -->
+      <button
+        class="fab-drag"
+        :style="{ left: fabPos.x + 'px', top: fabPos.y + 'px' }"
+        @pointerdown="onFabDown"
+        @pointermove="onFabMove"
+        @pointerup="onFabUp"
+        @pointercancel="onFabUp"
+        @click.stop="onFabTap"
+        title="拖动移动 · 点击新增记录"
+      >＋</button>
+
       <div class="sync-warning-bar">
         <span class="sync-warning-label">🔮 同步至号码系统</span>
         <input type="date" v-model="warnFromDate" class="form-input sync-date-input">
@@ -2210,6 +2223,52 @@ function openAdd() {
   showForm.value = true
 }
 
+// ===== 可拖动悬浮新增按钮（记录页） =====
+const fabPos = reactive({ x: 9999, y: 9999 })
+let fabDrag = null
+let fabMoved = false
+const FAB_SIZE = 52
+
+function fabReset() {
+  const s = FAB_SIZE
+  fabPos.x = Math.max(8, window.innerWidth - s - 16)
+  fabPos.y = Math.max(8, window.innerHeight - s - 130)
+}
+
+// 记录页显示时重置到右下角（处理窗口尺寸变化后出屏）
+watch(view, (v) => { if (v === 'records') fabReset() })
+
+function onFabDown(e) {
+  if (e.button !== undefined && e.button !== 0) return
+  e.preventDefault()
+  // 先钳制到视口内（防止 resize 后出屏点不到）
+  const s = FAB_SIZE
+  fabPos.x = Math.max(8, Math.min(window.innerWidth - s - 8, fabPos.x))
+  fabPos.y = Math.max(8, Math.min(window.innerHeight - s - 8, fabPos.y))
+  fabDrag = { sx: e.clientX, sy: e.clientY, ox: fabPos.x, oy: fabPos.y }
+  fabMoved = false
+  if (e.target && e.target.setPointerCapture) {
+    try { e.target.setPointerCapture(e.pointerId) } catch (_) {}
+  }
+}
+
+function onFabMove(e) {
+  if (!fabDrag) return
+  const dx = e.clientX - fabDrag.sx
+  const dy = e.clientY - fabDrag.sy
+  if (Math.abs(dx) > 5 || Math.abs(dy) > 5) fabMoved = true
+  const s = FAB_SIZE
+  fabPos.x = Math.max(8, Math.min(window.innerWidth - s - 8, fabDrag.ox + dx))
+  fabPos.y = Math.max(8, Math.min(window.innerHeight - s - 8, fabDrag.oy + dy))
+}
+
+function onFabUp() { fabDrag = null }
+
+function onFabTap() {
+  if (fabMoved) { fabMoved = false; return }
+  openAdd()
+}
+
 function openEdit(r) {
   editingId.value = r.id
   form.value = { date: r.date, draw_number: r.draw_number }
@@ -2384,7 +2443,9 @@ async function loadTrackingDetail() {
   try {
     const res = await apiFetch(`/longest-tracking/runs/${runId}?sort_by=${trackingSortBy.value}`)
     const data = await res.json()
-    trackingDetail.value = data
+    // 后端返回 { run: {id,name,min_n,...}, results, baseline, algorithms, is_stale }
+    // 平铺 run 元数据到顶层，否则 name/id/min_n 取不到
+    trackingDetail.value = { ...data.run, ...data }
   } catch (e) {
     $notify('加载演算详情失败：' + e.message, true)
   }
@@ -4261,8 +4322,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 
 /* ===== 数据记录 ===== */
 .records-view { padding: 0 12px 40px; }
-.rec-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 4px 10px; }
+.rec-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 4px 10px; flex-wrap: wrap; gap: 8px; }
+.rec-header-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .rec-title { font-size: 16px; font-weight: 700; color: #1a2a4a; }
+.fab-drag {
+  position: fixed; z-index: 999;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #4da6ff, #1a2a4a);
+  color: #fff; font-size: 28px; font-weight: 700; line-height: 1;
+  border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 16px rgba(26, 42, 74, .4);
+  touch-action: none;
+  user-select: none; -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.fab-drag:active { transform: scale(.92); }
 .btn-add {
   padding: 8px 18px; background: linear-gradient(135deg, #4da6ff, #1a2a4a);
   color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
