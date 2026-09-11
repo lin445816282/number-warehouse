@@ -265,6 +265,7 @@
             <button class="btn-add" style="font-size:13px" @click="trackingTab='new'">➕ 新建演算</button>
             <button class="btn-cancel" style="font-size:13px" @click="loadTrackingRuns()">🔄 刷新</button>
             <button class="btn-cancel" style="font-size:13px" @click="openAlgoDoc()">📚 算法文档</button>
+            <button class="btn-cancel" style="font-size:13px" @click="openTrackingHold()">🎯 跟踪持有</button>
           </div>
           <div v-if="trackingRunsLoading" style="text-align:center;padding:20px">⏳ 加载中...</div>
           <div v-else-if="trackingRuns.length === 0" style="text-align:center;padding:24px;color:#64748b">
@@ -303,6 +304,91 @@
                 </button>
                 <span style="font-size:11px;color:#94a3b8">点击卡片查看详情</span>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 跟踪持有（锁定最冷号连续跟踪） -->
+        <div v-else-if="trackingTab === 'hold'">
+          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+            <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="trackingTab='list'">← 返回列表</button>
+            <span style="font-size:13px;color:#1a2a4a;font-weight:700">🎯 跟踪持有（冷号回补）</span>
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">进场阈值(遗漏期数)</span>
+              <input type="number" v-model.number="holdTheta" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="1">
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;color:#64748b">跟踪期数 K</span>
+              <input type="number" v-model.number="holdK" class="form-input" style="width:64px;padding:5px 8px;font-size:13px" min="1">
+            </div>
+            <button class="btn-add" style="font-size:13px" @click="analyzeTrackingHold()" :disabled="holdLoading">
+              {{ holdLoading ? '分析中...' : '🔍 分析' }}
+            </button>
+          </div>
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:12px;line-height:1.6">
+            💡 锁定「最冷 1 号」（遗漏期数 ≥ 阈值即进场），连续跟踪 K 期直到命中即止盈，超 K 期止损。对比「每期重选」模式，本模型抓住「冷号回补」的正确语义。
+          </div>
+          <div v-if="holdLoading" style="text-align:center;padding:20px;color:#fbbf24">⏳ 分析中...</div>
+          <div v-else-if="holdResult">
+            <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+              <div class="tracking-stat" style="flex:1;min-width:110px">
+                <div class="tracking-stat-value" :style="{color: holdResult.edge > 0 ? '#0f9f45' : '#ef4444'}">{{ holdResult.win_rate }}%</div>
+                <div class="tracking-stat-label">命中率（基线 {{ holdResult.baseline }}%）</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:110px">
+                <div class="tracking-stat-value" :style="{color: holdResult.edge > 0 ? '#0f9f45' : '#ef4444'}">{{ holdResult.edge > 0 ? '+' : '' }}{{ holdResult.edge }}%</div>
+                <div class="tracking-stat-label">超随机基线</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:110px">
+                <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdResult.total_pnl }}</div>
+                <div class="tracking-stat-label">总盈亏（{{ holdResult.rounds }} 轮）</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:110px">
+                <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdResult.avg_hit_delay }} 期</div>
+                <div class="tracking-stat-label">平均命中期</div>
+              </div>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-bottom:6px">真样本外验证（前段 vs 后段，无重叠）</div>
+            <div style="display:flex;gap:10px;margin-bottom:12px">
+              <div class="tracking-stat" style="flex:1">
+                <div class="tracking-stat-value" :style="{color: holdResult.oos.front.total_pnl > 0 ? '#0f9f45' : '#ef4444'}">{{ holdResult.oos.front.win_rate }}%</div>
+                <div class="tracking-stat-label">前段命中（盈亏 {{ holdResult.oos.front.total_pnl }}）</div>
+              </div>
+              <div class="tracking-stat" style="flex:1">
+                <div class="tracking-stat-value" :style="{color: holdResult.oos.back.total_pnl > 0 ? '#0f9f45' : '#ef4444'}">{{ holdResult.oos.back.win_rate }}%</div>
+                <div class="tracking-stat-label">后段命中（盈亏 {{ holdResult.oos.back.total_pnl }}）</div>
+              </div>
+            </div>
+            <div style="font-size:11px;color:#94a3b8;line-height:1.6;margin-bottom:10px">
+              ⚠️ 若前段/后段命中率都超基线 → 信号稳健；若仅后段超基线（前段反向）→ 信号可能受近期数据结构变化影响，需实盘小注验证。
+            </div>
+          </div>
+
+          <!-- 实盘纸面跟踪 -->
+          <div v-if="holdLive" style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
+            <div style="font-size:12px;color:#64748b;margin-bottom:8px">📊 实盘纸面跟踪（最新 {{ holdLive.latest_record_date }}）</div>
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdLive.current.coldest_num }}</div>
+                <div class="tracking-stat-label">当前最冷号</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdLive.current.coldest_gap }} 期</div>
+                <div class="tracking-stat-label">遗漏期数</div>
+              </div>
+              <div class="tracking-stat" style="flex:1;min-width:90px">
+                <div class="tracking-stat-value" :style="{color: holdLive.current.signal ? '#0f9f45' : '#64748b'}">{{ holdLive.current.signal ? '建议进场' : '等待信号' }}</div>
+                <div class="tracking-stat-label">进场信号</div>
+              </div>
+            </div>
+            <div style="font-size:11px;color:#94a3b8;margin-bottom:6px">最冷 5 号：<span v-for="t in holdLive.current.top_cold" :key="t.num" style="margin-right:8px">{{ t.num }}<span style="color:#64748b">({{ t.gap }}期)</span></span></div>
+            <div style="font-size:11px;color:#64748b;line-height:1.8;max-height:96px;overflow-y:auto">
+              最近轨迹：
+              <span v-for="(t, i) in holdLive.trail" :key="i" style="margin-right:6px">
+                {{ t.date.slice(5) }}·{{ t.num || '空' }}{{ t.event && t.event.type === 'hit' ? '✅' : (t.event && t.event.type === 'stop' ? '⛔' : '') }}
+              </span>
             </div>
           </div>
         </div>
@@ -2163,6 +2249,11 @@ const trackingAutoRecalc = ref(true)  // 切换算法/口径时，若有更新�
 const recalcRunId = ref(null)         // 正在重算的 run id
 const showAlgoDoc = ref(false)        // 算法文档弹窗
 const algoDoc = ref({ algo_count: 0, categories: [] })
+const holdTheta = ref(10)             // 跟踪持有：进场阈值（遗漏期数）
+const holdK = ref(12)                 // 跟踪持有：跟踪期数
+const holdResult = ref(null)          // 跟踪持有分析结果
+const holdLoading = ref(false)
+const holdLive = ref(null)            // 实盘纸面跟踪（当前最冷号 + 最近轨迹）
 
 async function openTracking() {
   showTracking.value = true
@@ -2285,6 +2376,33 @@ async function openAlgoDoc() {
     showAlgoDoc.value = true
   } catch (e) {
     $notify('加载算法文档失败：' + e.message, true)
+  }
+}
+
+// 跟踪持有：锁定最冷 1 号，gap≥theta 进场，跟踪 K 期直到命中/止损
+function openTrackingHold() {
+  trackingTab.value = 'hold'
+  if (!holdResult.value) analyzeTrackingHold()
+  loadHoldLive()
+}
+async function analyzeTrackingHold() {
+  holdLoading.value = true
+  try {
+    const res = await apiFetch(`/tracking-hold/analyze?theta=${holdTheta.value}&K=${holdK.value}`)
+    holdResult.value = await res.json()
+  } catch (e) {
+    $notify('跟踪持有分析失败：' + e.message, true)
+  } finally {
+    holdLoading.value = false
+  }
+  loadHoldLive()
+}
+async function loadHoldLive() {
+  try {
+    const res = await apiFetch(`/tracking-hold/live?theta=${holdTheta.value}&K=${holdK.value}&tail=20`)
+    holdLive.value = await res.json()
+  } catch (e) {
+    holdLive.value = null
   }
 }
 

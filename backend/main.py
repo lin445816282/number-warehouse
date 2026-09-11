@@ -13,7 +13,8 @@ import sqlite3
 from auth import auth_router, AuthMiddleware, init_auth_db
 from tracking_engine import (
     ALGORITHMS, load_records, load_count_value_map, run_backtest, build_report,
-    build_algorithm_doc, ALGO_CATEGORIES,
+    build_algorithm_doc, ALGO_CATEGORIES, run_tracking_hold,
+    tracking_hold_current, tracking_hold_trail,
 )
 
 app = FastAPI(title="数字仓库轮换系统")
@@ -5529,6 +5530,61 @@ def delete_longest_tracking_run(run_id: int):
     db.commit()
     db.close()
     return {"ok": True}
+
+
+@app.get("/api/tracking-hold/analyze")
+def tracking_hold_analyze(theta: int = 10, K: int = 12, warmup: int = 100, years: int = 0):
+    """跟踪持有回测：锁定最冷 1 号，gap≥theta 进场，跟踪 K 期直到命中/止损。
+
+    与 67 种「每期重选」算法不同，本模型抓「冷号回补」的正确语义。
+    返回命中率 vs 随机基线 + 真样本外（前段/后段）对比 + 资金曲线（抽样）。
+    """
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    dates, draws = _filter_records_by_years(dates, draws, years)
+
+    result = run_tracking_hold(draws, theta=theta, K=K, warmup=warmup)
+    curve = result.pop("equity_curve", None)
+    if curve:
+        step = max(1, len(curve) // 200)
+        result["equity_curve"] = curve[::step]
+
+    result["total_records"] = len(draws)
+    result["date_from"] = dates[0]
+    result["date_to"] = dates[-1]
+
+    # 真样本外验证（前段 / 后段，无重叠）
+    half = len(draws) // 2
+    front = run_tracking_hold(draws[:half], theta=theta, K=K, warmup=warmup)
+    back = run_tracking_hold(draws[half:], theta=theta, K=K, warmup=warmup)
+    result["oos"] = {
+        "front": {"rounds": front["rounds"], "wins": front["wins"],
+                  "win_rate": front["win_rate"], "baseline": front["baseline"],
+                  "total_pnl": front["total_pnl"]},
+        "back": {"rounds": back["rounds"], "wins": back["wins"],
+                 "win_rate": back["win_rate"], "baseline": back["baseline"],
+                 "total_pnl": back["total_pnl"]},
+    }
+    return result
+
+
+@app.get("/api/tracking-hold/live")
+def tracking_hold_live(theta: int = 10, K: int = 12, tail: int = 30):
+    """实盘纸面跟踪：当前最冷号 + 是否建议进场 + 最近 tail 期实盘模拟轨迹。"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    current = tracking_hold_current(draws, theta=theta)
+    trail = tracking_hold_trail(draws, theta=theta, K=K, warmup=100, tail=tail)
+    for item in trail:
+        idx = item["date"]
+        item["date"] = dates[idx] if 0 <= idx < len(dates) else None
+    return {
+        "current": current,
+        "latest_record_date": dates[-1],
+        "trail": trail,
+    }
 
 
 # 认证中间件（在 StripPrefix 之前添加，使其在外层先剥离前缀）
