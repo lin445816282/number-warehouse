@@ -415,6 +415,30 @@
           <!-- 实盘纸面跟踪 -->
           <div v-if="holdLive" style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
             <div style="font-size:12px;color:#64748b;margin-bottom:8px">📊 实盘纸面跟踪（最新 {{ holdLive.latest_record_date }}）</div>
+
+            <!-- 下单指令卡 -->
+            <div style="padding:12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-radius:10px;margin-bottom:10px">
+              <div style="font-size:13px;font-weight:700;color:#1e40af;margin-bottom:8px">🎯 本期下单指令</div>
+              <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+                <div style="text-align:center">
+                  <div style="font-size:11px;color:#64748b">下单号码</div>
+                  <div style="font-size:36px;font-weight:800;color:#2563eb;line-height:1.1">{{ holdLive.current.coldest_num || '—' }}</div>
+                </div>
+                <div style="text-align:center">
+                  <div style="font-size:11px;color:#64748b">遗漏期数</div>
+                  <div style="font-size:22px;font-weight:700;color:#1e3a5f">{{ holdLive.current.coldest_gap }} 期</div>
+                </div>
+                <div style="text-align:center">
+                  <div style="font-size:11px;color:#64748b">进场信号</div>
+                  <div style="font-size:18px;font-weight:700" :style="{color: holdLive.current.signal ? '#0f9f45' : '#ef4444'}">{{ holdLive.current.signal ? '✅ 建议进场' : '⏳ 等待信号' }}</div>
+                </div>
+              </div>
+              <div v-if="holdSignal === 'consensus' && holdLive.current.votes" style="font-size:11px;color:#64748b;margin-top:6px">共识投票 <b>{{ holdLive.current.votes }}</b>/{{ holdLive.current.min_votes }} 票</div>
+              <div style="font-size:11px;color:#475569;margin-top:6px;line-height:1.7;background:#fff;padding:6px 8px;border-radius:6px">
+                💡 <b>怎么下</b>：每期 <b>1 元</b>跟踪该号，连续 <b>12 期</b>；命中赚 <b>47 倍</b>（净赚 47−已投入），12 期未中认亏离场（亏 12 元）。
+              </div>
+            </div>
+
             <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
               <div class="tracking-stat" style="flex:1;min-width:90px">
                 <div class="tracking-stat-value" style="color:#1a2a4a">{{ holdLive.current.coldest_num }}</div>
