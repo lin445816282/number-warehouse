@@ -429,6 +429,18 @@
                 <div class="tracking-stat-label">近30轮（命中率/盈亏）</div>
               </div>
             </div>
+            <div v-if="holdRounds.health" style="font-size:11px;color:#64748b;margin-bottom:8px;padding:6px 8px;background:#f8fafc;border-radius:6px">
+              信号健康度：近20轮命中率 <span style="font-weight:700">{{ holdRounds.health.recent20_rate }}%</span> vs 全量 {{ holdRounds.health.full_rate }}%
+              <span :style="{color: holdRounds.health.ratio >= 1 ? '#0f9f45' : '#ef4444', fontWeight:700}">
+                {{ holdRounds.health.ratio >= 1 ? '· 信号偏强' : '· 信号偏弱/衰减' }}
+              </span>
+            </div>
+            <div v-if="holdRounds.rolling && holdRounds.rolling.length" style="font-size:11px;color:#94a3b8;line-height:1.9;margin-bottom:8px">
+              <div style="color:#64748b;margin-bottom:2px">滚动验证（每200期一段命中率，绿赚红亏）：</div>
+              <span v-for="(s, i) in holdRounds.rolling" :key="i" style="margin-right:7px">
+                <span :style="{color: s.pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ s.start.slice(0,4) }}·{{ s.hit_rate }}%</span>
+              </span>
+            </div>
             <div style="font-size:11px;color:#94a3b8;line-height:1.8;max-height:150px;overflow-y:auto">
               <div v-for="(r, i) in holdRounds.rounds.slice(-12).reverse()" :key="i" style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px dashed #f0f0f0;gap:6px">
                 <span style="color:#64748b">{{ r.enter_date }} 进 {{ pad2(r.num) }}</span>

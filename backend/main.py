@@ -5605,11 +5605,35 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
     recent = rounds[-30:] if len(rounds) > 30 else rounds
     recent_hits = sum(1 for r in recent if r["result"] == "hit")
     recent_pnl = sum(r["pnl"] for r in recent)
+    full_rate = hits / total * 100 if total else 0
+
+    # 滚动分段（每 200 期一段）：信号时变性
+    rolling = []
+    seg_size = 200
+    for i in range(0, len(dates), seg_size):
+        seg_start = dates[i]
+        seg_end = dates[min(i + seg_size, len(dates)) - 1]
+        seg_rounds = [r for r in rounds if seg_start <= r["enter_date"] <= seg_end]
+        if not seg_rounds:
+            continue
+        seg_hits = sum(1 for r in seg_rounds if r["result"] == "hit")
+        rolling.append({
+            "start": seg_start, "end": seg_end,
+            "rounds": len(seg_rounds), "hits": seg_hits,
+            "hit_rate": round(seg_hits / len(seg_rounds) * 100, 1),
+            "pnl": sum(r["pnl"] for r in seg_rounds),
+        })
+
+    # 信号健康度：最近 20 轮命中率 vs 全量命中率（>1 信号强，<1 衰减）
+    recent20 = rounds[-20:] if len(rounds) > 20 else rounds
+    recent20_rate = sum(1 for r in recent20 if r["result"] == "hit") / len(recent20) * 100 if recent20 else 0
+    health = round(recent20_rate / full_rate, 2) if full_rate > 0 else None
+
     return {
         "rounds": rounds,
         "summary": {
             "total": total, "hits": hits,
-            "hit_rate": round(hits / total * 100, 2) if total else 0,
+            "hit_rate": round(full_rate, 2),
             "total_pnl": total_pnl,
             "avg_pnl": round(total_pnl / total, 3) if total else 0,
         },
@@ -5618,6 +5642,8 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
             "hit_rate": round(recent_hits / len(recent) * 100, 2) if recent else 0,
             "total_pnl": recent_pnl,
         },
+        "rolling": rolling,
+        "health": {"recent20_rate": round(recent20_rate, 2), "full_rate": round(full_rate, 2), "ratio": health},
     }
 
 
