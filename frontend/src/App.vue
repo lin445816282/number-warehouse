@@ -461,6 +461,16 @@
                 {{ holdRounds.health.ratio >= 1 ? '· 信号偏强' : '· 信号偏弱/衰减' }}
               </span>
             </div>
+            <!-- 跌破盈利门槛预警（近期命中率 vs 盈亏平衡门槛） -->
+            <div v-if="holdRounds.metrics && holdRounds.health" style="font-size:12px;margin-bottom:8px;padding:8px 10px;border-radius:6px;font-weight:600"
+                 :style="{background: holdRounds.health.recent20_rate < holdRounds.metrics.breakeven ? '#fef2f2' : '#f0fdf4', border:'1px solid ' + (holdRounds.health.recent20_rate < holdRounds.metrics.breakeven ? '#fecaca' : '#bbf7d0')}">
+              <span :style="{color: holdRounds.health.recent20_rate < holdRounds.metrics.breakeven ? '#dc2626' : '#0f9f45'}">
+                {{ holdRounds.health.recent20_rate < holdRounds.metrics.breakeven ? '⚠️ 信号已跌破盈利门槛，建议停手观察' : '✅ 信号越过盈利门槛，可小注跟踪' }}
+              </span>
+              <span style="font-weight:400;color:#64748b;margin-left:4px">
+                （近20轮 {{ holdRounds.health.recent20_rate }}% vs 门槛 {{ holdRounds.metrics.breakeven }}%）
+              </span>
+            </div>
             <div v-if="holdRounds.rolling && holdRounds.rolling.length" style="font-size:11px;color:#94a3b8;margin-bottom:8px">
               <div style="color:#64748b;margin-bottom:4px">滚动验证（每200期一段命中率，绿赚红亏）：</div>
               <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:4px">
