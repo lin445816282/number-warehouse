@@ -775,6 +775,61 @@ def tracking_hold_metrics(rounds, K):
     }
 
 
+def tracking_hold_multi(draws, N=8, K=6, warmup=100):
+    """前 N 最冷号 + K 期周期：锁定最冷 N 号跟踪 K 期，命中/止损后空仓等号开出再买。
+
+    返回 rounds: [{num_list, gaps, held, result, pnl, hit_num, enter_idx, end_idx}]
+    一轮盈亏：命中(第d期)=47-N*d；止损(K期没中)=-N*K
+    """
+    M = len(draws)
+    last_seen = {n: -1 for n in range(1, 50)}
+    for t in range(min(warmup, M)):
+        last_seen[draws[t]] = t
+    state = "BUY"
+    tracking = []
+    held = 0
+    enter_idx = None
+    wait_set = set()
+    rounds = []
+    for t in range(warmup, M):
+        gap = {n: (t - last_seen[n]) if last_seen[n] >= 0 else t for n in range(1, 50)}
+        if state == "WAIT":
+            if draws[t] in wait_set:
+                state = "BUY"
+                wait_set = set()
+                tracking = []
+                held = 0
+                enter_idx = None
+        else:
+            if not tracking:
+                tracking = sorted(range(1, 50), key=lambda x: gap[x], reverse=True)[:N]
+                held = 0
+                enter_idx = t
+            held += 1
+            if draws[t] in tracking:
+                rounds.append({
+                    "num_list": tracking[:], "gaps": [gap[x] for x in tracking],
+                    "held": held, "hit_num": draws[t], "result": "hit",
+                    "pnl": 47 - N * held, "enter_idx": enter_idx, "end_idx": t,
+                })
+                tracking = []
+                held = 0
+                enter_idx = None
+            elif held >= K:
+                rounds.append({
+                    "num_list": tracking[:], "gaps": [gap[x] for x in tracking],
+                    "held": K, "hit_num": None, "result": "stop",
+                    "pnl": -N * K, "enter_idx": enter_idx, "end_idx": t,
+                })
+                wait_set = set(tracking)
+                tracking = []
+                held = 0
+                enter_idx = None
+                state = "WAIT"
+        last_seen[draws[t]] = t
+    return rounds
+
+
 # ── 算法文档 ──
 # 分类映射：algo_id 区间 → (类别名, 说明)
 ALGO_CATEGORIES = [
@@ -828,6 +883,163 @@ def build_algorithm_doc():
     lines.append("- ⚠️ 47 赔率 < 49 号码，等额口径长期负期望；冷号回补信号在历史数据上偏弱。")
     lines.append("")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 实盘下单执行引擎（真实资金跟踪，每日增量推进）
+# ══════════════════════════════════════════════════════════════════
+#
+# 与 tracking_hold_rounds / tracking_hold_multi 完全同构的状态机，
+# 但以「账户 + 每日推进」的形式表达，落库可复现。
+#
+# 方案：
+#   cold1  = 最冷1号，N=1, K=12, bet=10元/期，信号 gap>=theta(10) 进场
+#   multi8 = 前8最冷号，N=8, K=6, bet=5元/号，锁最冷8号跟踪，止损后 WAIT 等号开出
+#
+# 资金口径（每号 bet 元）：
+#   cold1  命中第 held 期 = (47 - held) * bet；止损 = -K * bet
+#   multi8 命中第 held 期 = (47 - N*held) * bet；止损 = -N*K*bet
+# ══════════════════════════════════════════════════════════════════
+
+def live_trade_scheme_params(scheme):
+    """返回方案的静态参数。"""
+    if scheme == "cold1":
+        return {"name": "最冷1号", "N": 1, "K": 12, "bet": 10.0, "theta": 10}
+    if scheme == "multi8":
+        return {"name": "前8号6期", "N": 8, "K": 6, "bet": 5.0, "theta": 0}
+    raise ValueError(f"未知方案 {scheme}")
+
+
+def _live_gap_at(draws, t):
+    """计算第 t 期开奖前的遗漏 gap（walk-forward，只用 0..t-1 期）。"""
+    last_seen = {}
+    for i in range(t):
+        last_seen[draws[i]] = i
+    gap = {}
+    for n in range(1, 50):
+        ls = last_seen.get(n, -1)
+        gap[n] = (t - ls - 1) if ls >= 0 else t
+    return gap
+
+
+def live_trade_advance(scheme, account, draws, dates):
+    """每日推进：从账户 last_processed_date 之后逐日推进到最新开奖。
+
+    account: dict {tracking_nums:[], held:int, enter_date:str, state:'BUY'/'WAIT',
+                   wait_set:[], last_processed_date:str, current_capital:float,
+                   bet:float, N:int, K:int, theta:float}
+    返回 (new_account_state_dict, orders)，orders 为 [{trade_date, nums, bet_amount,
+    day_cost, held, result, hit_num, round_pnl, capital_after}]。
+
+    ⚠️ 与 tracking_hold 同构，但「进场/持有/命中/止损」逐日记录。
+    命中当天 result='hit'、止损当天 result='stop'，中间持有 result='hold'。
+    """
+    N = account["N"]
+    K = account["K"]
+    bet = account["bet"]
+    theta = account.get("theta", 10)
+
+    last_date = account.get("last_processed_date", "")
+    start_t = 0
+    if last_date:
+        for i, d in enumerate(dates):
+            if d > last_date:
+                start_t = i
+                break
+        else:
+            start_t = len(dates)
+
+    tracking = list(account.get("tracking_nums") or [])
+    held = account.get("held", 0)
+    enter_date = account.get("enter_date", "")
+    state = account.get("state", "BUY")
+    wait_set = set(account.get("wait_set") or [])
+    capital = float(account.get("current_capital", 0))
+    prev_date = last_date
+
+    orders = []
+
+    for t in range(start_t, len(dates)):
+        d = dates[t]
+        draw = draws[t]
+
+        # ── WAIT 状态：等 wait_set 中任一号开出才回 BUY ──
+        # ⚠️ 与 tracking_hold_multi 一致：等到号的当天只解除 WAIT，下一期才进场
+        if scheme == "multi8" and state == "WAIT":
+            prev_date = d
+            if draw in wait_set:
+                state = "BUY"
+                wait_set = set()
+            continue
+
+        # ── 空仓：进场判断 ──
+        if not tracking:
+            if scheme == "cold1":
+                gap = _live_gap_at(draws, t)
+                coldest = max(range(1, 50), key=lambda x: gap[x])
+                if gap[coldest] >= theta:
+                    tracking = [coldest]
+                    held = 0
+                    enter_date = d
+            else:  # multi8：锁前 N 最冷号
+                gap = _live_gap_at(draws, t)
+                tracking = sorted(range(1, 50), key=lambda x: gap[x], reverse=True)[:N]
+                held = 0
+                enter_date = d
+
+        # ── 持仓：held+1 后看开奖 ──
+        if tracking:
+            held += 1
+            held_now = held  # 快照：命中/止损后 held 会重置，订单需记录本期实际期数
+            day_cost = N * bet
+            result = "hold"
+            hit_num = None
+            round_pnl = None
+            nums_now = list(tracking)
+
+            if draw in tracking:
+                result = "hit"
+                hit_num = draw
+                round_pnl = (47 - N * held) * bet
+                capital += round_pnl
+                tracking = []
+                held = 0
+                enter_date = ""
+            elif held >= K:
+                result = "stop"
+                round_pnl = -N * K * bet
+                capital += round_pnl
+                if scheme == "multi8":
+                    wait_set = set(tracking)
+                    state = "WAIT"
+                tracking = []
+                held = 0
+                enter_date = ""
+
+            orders.append({
+                "trade_date": d,
+                "nums": nums_now,
+                "bet_amount": bet,
+                "day_cost": day_cost,
+                "held": held_now,
+                "result": result,
+                "hit_num": hit_num,
+                "round_pnl": round_pnl,
+                "capital_after": round(capital, 2),
+            })
+
+        prev_date = d
+
+    new_account = {
+        "tracking_nums": tracking,
+        "held": held,
+        "enter_date": enter_date,
+        "state": state,
+        "wait_set": sorted(wait_set),
+        "last_processed_date": prev_date if prev_date else last_date,
+        "current_capital": round(capital, 2),
+    }
+    return new_account, orders
 
 
 if __name__ == "__main__":
