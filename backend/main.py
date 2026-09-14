@@ -15,7 +15,8 @@ from tracking_engine import (
     ALGORITHMS, load_records, load_count_value_map, run_backtest, build_report,
     build_algorithm_doc, ALGO_CATEGORIES, run_tracking_hold,
     tracking_hold_current, tracking_hold_trail, tracking_hold_rounds,
-    tracking_hold_metrics,
+    tracking_hold_metrics, tracking_hold_multi,
+    live_trade_scheme_params, live_trade_advance,
 )
 
 app = FastAPI(title="数字仓库轮换系统")
@@ -334,6 +335,81 @@ def init_db():
             FOREIGN KEY (run_id) REFERENCES tracking_runs(id)
         )
     """)
+    # 前8最冷号+6期周期方案逐轮明细表
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS multi_track_8_rounds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            N INTEGER NOT NULL DEFAULT 8,
+            K INTEGER NOT NULL DEFAULT 6,
+            enter_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            num_list TEXT NOT NULL,
+            gaps TEXT NOT NULL,
+            held INTEGER NOT NULL DEFAULT 0,
+            hit_num INTEGER,
+            result TEXT NOT NULL,
+            pnl INTEGER NOT NULL DEFAULT 0,
+            cum_pnl INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_mt8_date ON multi_track_8_rounds(N, K, end_date)")
+
+    # ── 实盘下单执行（真实资金跟踪）──
+    # 账户表：每个方案一个账户，含当前本金/起始下单金额/持仓状态
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS live_trade_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scheme TEXT NOT NULL UNIQUE,        -- cold1 / multi8
+            name TEXT NOT NULL,                 -- 最冷1号 / 前8号6期
+            initial_capital REAL NOT NULL DEFAULT 3000,
+            current_capital REAL NOT NULL DEFAULT 3000,
+            bet_amount REAL NOT NULL DEFAULT 10,  -- 起始下单金额（每号）
+            N INTEGER NOT NULL DEFAULT 1,         -- 下注号码数
+            K INTEGER NOT NULL DEFAULT 12,        -- 跟踪期数
+            warn_threshold REAL NOT NULL DEFAULT 500,  -- 预警线
+            tracking_nums TEXT DEFAULT '',        -- 当前持仓号码 JSON，空=空仓
+            held INTEGER NOT NULL DEFAULT 0,      -- 已持仓期数
+            enter_date TEXT DEFAULT '',           -- 进场日期
+            state TEXT DEFAULT 'BUY',             -- BUY / WAIT（multi8 止损后等待）
+            wait_set TEXT DEFAULT '',             -- multi8 止损后等待开出的号集 JSON
+            last_processed_date TEXT DEFAULT '',  -- 已结算到的最后开奖日期
+            status TEXT NOT NULL DEFAULT 'running',  -- running / warn / bankrupt
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    # 每日下单明细表：每天一条（enter/hold/hit/stop）
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS live_trade_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            trade_date TEXT NOT NULL,
+            nums TEXT NOT NULL,                  -- 下单号码 JSON
+            bet_amount REAL NOT NULL,            -- 每号金额
+            day_cost REAL NOT NULL DEFAULT 0,    -- 当天投入
+            held INTEGER NOT NULL DEFAULT 0,     -- 第几期
+            result TEXT NOT NULL,                -- enter/hold/hit/stop
+            hit_num INTEGER,                     -- 命中号
+            round_pnl REAL,                      -- 整轮盈亏（hit/stop 才有）
+            capital_after REAL NOT NULL,         -- 结算后本金
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            UNIQUE(account_id, trade_date)
+        )
+    """)
+    # 本金流水表：初始化/增加本金/结算
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS live_trade_capital_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            change_type TEXT NOT NULL,           -- init / deposit
+            amount REAL NOT NULL,
+            capital_before REAL,
+            capital_after REAL NOT NULL,
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_lt_orders ON live_trade_orders(account_id, trade_date)")
     db.commit()
     db.close()
 
@@ -5533,6 +5609,75 @@ def delete_longest_tracking_run(run_id: int):
     return {"ok": True}
 
 
+@app.get("/api/cold8-alert/status")
+def cold8_alert_status(window: int = 30, tail: int = 60):
+    """最冷8码 实时失效预警：前向跟踪滚动命中率 + 连续未命中 + 分级 + 命中轨迹。
+
+    核心认知：冷号8码全量无真实 edge（z=0.80），不存在「从有效到失效」的转变，
+    但存在「低迷段」（滚动命中率掉到 6%~12%）。本接口做「状态监控」——
+    检测当前是否处于冷号低迷期，低迷时提示暂停，而非假装能预测失效。
+    """
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    N = 8
+    p0 = N / 49
+    warmup = 100
+    last_seen = {n: -1 for n in range(1, 50)}
+    fwd = []  # (date, hit)
+    for t in range(len(draws)):
+        if t >= warmup:
+            gap = {n: ((t - last_seen[n]) if last_seen[n] >= 0 else t) for n in range(1, 50)}
+            picks = sorted(range(1, 50), key=lambda x: -gap[x])[:N]
+            fwd.append((dates[t], draws[t] in picks))
+        last_seen[draws[t]] = t
+
+    total = len(draws)
+    cur_gap = {n: ((total - last_seen[n]) if last_seen[n] >= 0 else total) for n in range(1, 50)}
+    cur_picks = sorted(range(1, 50), key=lambda x: -cur_gap[x])[:N]
+    cur_picks_detail = [{"num": n, "gap": cur_gap[n]} for n in cur_picks]
+
+    recent = fwd[-window:]
+    rolling_hits = sum(1 for _, h in recent if h)
+    rolling_rate = rolling_hits / len(recent) * 100 if recent else 0
+
+    consec_miss = 0
+    for _, h in reversed(fwd):
+        if not h:
+            consec_miss += 1
+        else:
+            break
+
+    # 分级：连续未命中(主信号，最即时) + 滚动命中率(辅助，看中期)
+    level = "green"
+    if consec_miss >= 12 or rolling_rate < 6.7:
+        level = "red"
+    elif consec_miss >= 8 or rolling_rate < 10:
+        level = "yellow"
+
+    advice = {
+        "green": {"text": "冷号正常，可继续跟踪", "action": "continue"},
+        "yellow": {"text": "冷号偏冷，建议减半/观望", "action": "reduce"},
+        "red": {"text": "冷号低迷，建议暂停跟注", "action": "pause"},
+    }[level]
+
+    trail = [{"date": d, "hit": 1 if h else 0} for d, h in fwd[-tail:]]
+
+    return {
+        "current_picks": cur_picks_detail,
+        "rolling_window": window,
+        "rolling_rate": round(rolling_rate, 2),
+        "rolling_hits": rolling_hits,
+        "baseline": round(p0 * 100, 2),
+        "consec_miss": consec_miss,
+        "level": level,
+        "advice": advice,
+        "trail": trail,
+        "latest_record_date": dates[-1],
+        "total_forward": len(fwd),
+    }
+
+
 @app.get("/api/tracking-hold/analyze")
 def tracking_hold_analyze(theta: float = 10, K: int = 12, warmup: int = 100, years: int = 0, signal: str = "gap", min_votes: int = 4):
     """跟踪持有回测：锁定最冷 1 号，进场信号≥theta 时进场，跟踪 K 期直到命中/止损。
@@ -5593,17 +5738,36 @@ def tracking_hold_live(theta: float = 10, K: int = 12, tail: int = 30, signal: s
 
 
 @app.get("/api/tracking-hold/rounds")
-def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap", min_votes: int = 4):
-    """实盘纸面跟踪：完整历史的每轮明细 + 汇总 + 近期实盘验证（最近 30 轮）。"""
+def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap", min_votes: int = 4, start_date: str = None, end_date: str = None):
+    """实盘纸面跟踪：完整历史的每轮明细 + 汇总 + 近期实盘验证（最近 30 轮），支持日期段过滤。"""
     dates, draws = load_records()
     if not draws:
         raise HTTPException(400, "无记录")
     rounds = tracking_hold_rounds(draws, theta=theta, K=K, signal=signal, min_votes=min_votes)
+    _db = get_db()
+    _db.row_factory = sqlite3.Row
+    day_seq_map = {row["date"]: row["day_seq"] for row in _db.execute("SELECT date, day_seq FROM records").fetchall()}
+    _db.close()
     for r in rounds:
         r["enter_date"] = dates[r["enter_idx"]] if r["enter_idx"] < len(dates) else None
         r["end_date"] = dates[r["end_idx"]] if r["end_idx"] < len(dates) else None
+        r["enter_day_seq"] = day_seq_map.get(r["enter_date"])
+        r["end_day_seq"] = day_seq_map.get(r["end_date"])
+        r["total_gap"] = r["enter_gap"] + r["held"]
         r.pop("enter_idx", None)
         r.pop("end_idx", None)
+    # 全量 rounds（rolling/health/metrics 信号质量指标保持全量）
+    all_rounds = rounds
+    # 日期段过滤（按进场日期）
+    if start_date or end_date:
+        rounds = [r for r in all_rounds
+                  if (not start_date or (r["enter_date"] and r["enter_date"] >= start_date))
+                  and (not end_date or (r["enter_date"] and r["enter_date"] <= end_date))]
+    # 累计盈亏按当前查询结果重算
+    _cum = 0
+    for r in rounds:
+        _cum += r["pnl"]
+        r["cum_pnl"] = _cum
     total = len(rounds)
     hits = sum(1 for r in rounds if r["result"] == "hit")
     total_pnl = sum(r["pnl"] for r in rounds)
@@ -5618,7 +5782,7 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
     for i in range(0, len(dates), seg_size):
         seg_start = dates[i]
         seg_end = dates[min(i + seg_size, len(dates)) - 1]
-        seg_rounds = [r for r in rounds if seg_start <= r["enter_date"] <= seg_end]
+        seg_rounds = [r for r in all_rounds if seg_start <= r["enter_date"] <= seg_end]
         if not seg_rounds:
             continue
         seg_hits = sum(1 for r in seg_rounds if r["result"] == "hit")
@@ -5630,12 +5794,66 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
         })
 
     # 信号健康度：最近 20 轮命中率 vs 全量命中率（>1 信号强，<1 衰减）
-    recent20 = rounds[-20:] if len(rounds) > 20 else rounds
+    recent20 = all_rounds[-20:] if len(all_rounds) > 20 else all_rounds
     recent20_rate = sum(1 for r in recent20 if r["result"] == "hit") / len(recent20) * 100 if recent20 else 0
-    health = round(recent20_rate / full_rate, 2) if full_rate > 0 else None
+    _full_hits = sum(1 for r in all_rounds if r["result"] == "hit")
+    _full_total = len(all_rounds)
+    _full_rate = _full_hits / _full_total * 100 if _full_total else 0
+    health = round(recent20_rate / _full_rate, 2) if _full_rate > 0 else None
+
+    # 当前进行中的跟踪（未完结，最后一条 trail 为 hold 事件且仍在跟号）
+    in_progress = None
+    _trail = tracking_hold_trail(draws, theta=theta, K=K, warmup=100, tail=K + 5, signal=signal, min_votes=min_votes)
+    if _trail:
+        _last = _trail[-1]
+        if _last.get("event") and _last["event"]["type"] == "hold" and _last.get("num") is not None:
+            _num = _last["num"]
+            _held = _last["held"]
+            _enter_idx = _last["date"]
+            for _item in reversed(_trail):
+                if _item.get("num") == _num and _item.get("held") == 1:
+                    _enter_idx = _item["date"]
+                    break
+            in_progress = {
+                "num": _num,
+                "held": _held,
+                "enter_date": dates[_enter_idx] if 0 <= _enter_idx < len(dates) else None,
+                "remaining": K - _held,
+            }
+            # 把进行中轮次也追加进明细列表（result="holding"），避免列表止步于上一轮止损
+            _enter_d = in_progress["enter_date"]
+            if _enter_d is not None:
+                _enter_i = _enter_idx if isinstance(_enter_idx, int) and 0 <= _enter_idx < len(dates) else None
+                if _enter_i is not None:
+                    _last_idx = -1
+                    for _i in range(_enter_i):
+                        if draws[_i] == _num:
+                            _last_idx = _i
+                    _enter_gap = (_enter_i - _last_idx) if _last_idx >= 0 else _enter_i
+                    _last_cum = rounds[-1]["cum_pnl"] if rounds else 0
+                    _ok = True
+                    if start_date and _enter_d < start_date:
+                        _ok = False
+                    if end_date and _enter_d > end_date:
+                        _ok = False
+                    if _ok:
+                        rounds.append({
+                            "num": _num,
+                            "enter_date": _enter_d,
+                            "end_date": None,
+                            "enter_day_seq": day_seq_map.get(_enter_d),
+                            "end_day_seq": None,
+                            "enter_gap": _enter_gap,
+                            "total_gap": _enter_gap + _held,
+                            "held": _held,
+                            "result": "holding",
+                            "pnl": 0,
+                            "cum_pnl": _last_cum,
+                        })
 
     return {
         "rounds": rounds,
+        "in_progress": in_progress,
         "summary": {
             "total": total, "hits": hits,
             "hit_rate": round(full_rate, 2),
@@ -5648,9 +5866,393 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
             "total_pnl": recent_pnl,
         },
         "rolling": rolling,
-        "health": {"recent20_rate": round(recent20_rate, 2), "full_rate": round(full_rate, 2), "ratio": health},
-        "metrics": tracking_hold_metrics(rounds, K),
+        "health": {"recent20_rate": round(recent20_rate, 2), "full_rate": round(_full_rate, 2), "ratio": health},
+        "metrics": tracking_hold_metrics(all_rounds, K),
     }
+
+
+@app.get("/api/conclusion")
+def get_conclusion():
+    """返回冷号回补策略完整研究结论文档（markdown）"""
+    path = os.path.join(os.path.dirname(__file__), "..", "analysis", "conclusion.md")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"ok": True, "content": content}
+    except FileNotFoundError:
+        raise HTTPException(404, "结论文档不存在")
+
+
+@app.get("/api/tracking-hold/monthly")
+def tracking_hold_monthly(theta: float = 10, K: int = 12, signal: str = "gap", min_votes: int = 4, stop_limit: int = 30):
+    """按月聚合盈亏 + 当月风控状态（月度止损线 stop_limit）"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    rounds = tracking_hold_rounds(draws, theta=theta, K=K, signal=signal, min_votes=min_votes)
+    monthly = {}
+    for r in rounds:
+        m = dates[r["end_idx"]][:7] if r["end_idx"] < len(dates) else "未知"
+        monthly.setdefault(m, 0.0)
+        monthly[m] += r["pnl"]
+    monthly_list = [{"month": m, "pnl": round(v, 1)} for m, v in sorted(monthly.items())]
+    cur_month = dates[-1][:7] if dates else ""
+    cur_pnl = monthly.get(cur_month, 0.0)
+    return {
+        "monthly": monthly_list,
+        "current_month": cur_month,
+        "current_month_pnl": round(cur_pnl, 1),
+        "stop_limit": stop_limit,
+        "stopped": cur_pnl <= -stop_limit,
+    }
+
+
+def sync_multi_track_8(N=8, K=6):
+    """同步「前 N 最冷号 + K 期周期」方案逐轮明细到数据库"""
+    dates, draws = load_records()
+    if not draws:
+        return 0
+    rounds = tracking_hold_multi(draws, N=N, K=K)
+    db = get_db()
+    db.execute("DELETE FROM multi_track_8_rounds WHERE N=? AND K=?", (N, K))
+    cum = 0
+    for r in rounds:
+        enter_date = dates[r["enter_idx"]] if r["enter_idx"] < len(dates) else None
+        end_date = dates[r["end_idx"]] if r["end_idx"] < len(dates) else None
+        cum += r["pnl"]
+        db.execute(
+            "INSERT INTO multi_track_8_rounds (N,K,enter_date,end_date,num_list,gaps,held,hit_num,result,pnl,cum_pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (N, K, enter_date, end_date, json.dumps(r["num_list"]), json.dumps(r["gaps"]),
+             r["held"], r["hit_num"], r["result"], r["pnl"], cum),
+        )
+    db.commit()
+    db.close()
+    return len(rounds)
+
+
+@app.get("/api/multi-track-8/detail")
+def multi_track_8_detail(start_date: str = None, end_date: str = None, N: int = 8, K: int = 6):
+    """从数据库读「前 N 最冷号 + K 期周期」方案逐轮明细，支持按日期段查询 + 停手信号(health/metrics 全量)"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    db = get_db()
+    row = db.execute("SELECT MAX(end_date) FROM multi_track_8_rounds WHERE N=? AND K=?", (N, K)).fetchone()
+    latest_db = row[0] if row else None
+    latest_data = dates[-1] if dates else None
+    db.close()
+    if latest_db != latest_data:
+        sync_multi_track_8(N, K)
+
+    def _to_round(row):
+        return {
+            "enter_date": row["enter_date"], "end_date": row["end_date"],
+            "num_list": json.loads(row["num_list"]), "gaps": json.loads(row["gaps"]),
+            "held": row["held"], "hit_num": row["hit_num"],
+            "result": row["result"], "pnl": row["pnl"], "cum_pnl": row["cum_pnl"],
+        }
+
+    db = get_db()
+    # 全量 rounds（停手信号 health/metrics 用全量，不受日期段影响）
+    all_rows = db.execute("SELECT * FROM multi_track_8_rounds WHERE N=? AND K=? ORDER BY enter_date", (N, K)).fetchall()
+    all_rounds = [_to_round(r) for r in all_rows]
+    # 日期段过滤 rounds
+    q = "SELECT * FROM multi_track_8_rounds WHERE N=? AND K=?"
+    params = [N, K]
+    if start_date:
+        q += " AND enter_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND enter_date <= ?"
+        params.append(end_date)
+    q += " ORDER BY enter_date"
+    rows = db.execute(q, params).fetchall()
+    db.close()
+    rounds = [_to_round(r) for r in rows]
+    # 累计盈亏按当前查询结果重算
+    _cum = 0
+    for r in rounds:
+        _cum += r["pnl"]
+        r["cum_pnl"] = _cum
+    hits = sum(1 for r in rounds if r["result"] == "hit")
+    total_pnl = sum(r["pnl"] for r in rounds)
+
+    # 停手信号：health（近20轮 vs 全量）+ metrics（盈亏平衡门槛/最长连亏）
+    full_hits = sum(1 for r in all_rounds if r["result"] == "hit")
+    full_rate = full_hits / len(all_rounds) * 100 if all_rounds else 0
+    recent20 = all_rounds[-20:] if len(all_rounds) > 20 else all_rounds
+    recent20_rate = sum(1 for r in recent20 if r["result"] == "hit") / len(recent20) * 100 if recent20 else 0
+    health = {"recent20_rate": round(recent20_rate, 2), "full_rate": round(full_rate, 2),
+              "ratio": round(recent20_rate / full_rate, 2) if full_rate > 0 else None}
+    # 盈亏平衡命中率：p = N*K / (47 + N*K - N*d_bar)
+    hit_rounds = [r for r in all_rounds if r["result"] == "hit"]
+    d_bar = sum(r["held"] for r in hit_rounds) / len(hit_rounds) if hit_rounds else None
+    breakeven = N * K / (47 + N * K - N * d_bar) * 100 if d_bar else None
+    pnls = [r["pnl"] for r in all_rounds]
+    mu = sum(pnls) / len(pnls) if pnls else 0.0
+    max_streak = cur = 0
+    for r in all_rounds:
+        if r["pnl"] < 0:
+            cur += 1
+            max_streak = max(max_streak, cur)
+        else:
+            cur = 0
+    # 当前连亏（从最近已完结轮往前数连续止损）
+    cur_streak = 0
+    for r in reversed(all_rounds):
+        if r["pnl"] < 0:
+            cur_streak += 1
+        else:
+            break
+    metrics = {"breakeven": round(breakeven, 2) if breakeven is not None else None,
+               "max_loss_streak": max_streak,
+               "cur_loss_streak": cur_streak,
+               "d_bar": round(d_bar, 2) if d_bar is not None else None,
+               "mu": round(mu, 3)}
+
+    # 当天号码：当前最冷 N 号
+    _M = len(draws)
+    _last_seen = {n: -1 for n in range(1, 50)}
+    for _t in range(_M):
+        _last_seen[draws[_t]] = _t
+    _gap = {n: (_M - 1 - _last_seen[n]) if _last_seen[n] >= 0 else _M - 1 for n in range(1, 50)}
+    current = sorted(range(1, 50), key=lambda x: _gap[x], reverse=True)[:N]
+    return {
+        "rounds": rounds,
+        "summary": {
+            "total": len(rounds),
+            "hits": hits,
+            "stops": len(rounds) - hits,
+            "hit_rate": round(hits / len(rounds) * 100, 2) if rounds else 0,
+            "total_pnl": total_pnl,
+        },
+        "params": {"N": N, "K": K},
+        "date_range": {"start": start_date, "end": end_date},
+        "current": {"nums": current, "gaps": [_gap[x] for x in current]},
+        "health": health,
+        "metrics": metrics,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 实盘下单执行 API（真实资金跟踪）
+# ══════════════════════════════════════════════════════════════════
+
+def _live_account_row_to_dict(row):
+    return {
+        "id": row["id"], "scheme": row["scheme"], "name": row["name"],
+        "initial_capital": row["initial_capital"], "current_capital": row["current_capital"],
+        "bet_amount": row["bet_amount"], "N": row["N"], "K": row["K"],
+        "warn_threshold": row["warn_threshold"],
+        "tracking_nums": json.loads(row["tracking_nums"]) if row["tracking_nums"] else [],
+        "held": row["held"], "enter_date": row["enter_date"],
+        "state": row["state"],
+        "wait_set": json.loads(row["wait_set"]) if row["wait_set"] else [],
+        "last_processed_date": row["last_processed_date"],
+        "status": row["status"],
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+
+
+def _live_update_account_status(db, account_id, capital, warn_threshold):
+    """根据本金更新状态：< warn_threshold → warn；<= 0 → bankrupt。"""
+    if capital <= 0:
+        status = "bankrupt"
+    elif capital < warn_threshold:
+        status = "warn"
+    else:
+        status = "running"
+    db.execute("UPDATE live_trade_accounts SET status=? WHERE id=?", (status, account_id))
+    return status
+
+
+@app.get("/api/live-trade/accounts")
+def live_trade_accounts():
+    """实盘账户列表（含当前持仓 + 预警状态）。"""
+    db = get_db()
+    rows = db.execute("SELECT * FROM live_trade_accounts ORDER BY id").fetchall()
+    db.close()
+    return {"accounts": [_live_account_row_to_dict(r) for r in rows]}
+
+
+@app.post("/api/live-trade/init")
+def live_trade_init(scheme: str, capital: float = 3000, bet: float = None):
+    """初始化/重置一个实盘账户。bet=None 用方案默认（cold1=10, multi8=5）。"""
+    if scheme not in ("cold1", "multi8"):
+        raise HTTPException(400, "scheme 只能是 cold1 或 multi8")
+    p = live_trade_scheme_params(scheme)
+    if bet is None:
+        bet = p["bet"]
+    db = get_db()
+    # 取最新开奖日期作为初始 last_processed_date（账户从今天之后开始跟踪）
+    latest = db.execute("SELECT MAX(date) d FROM records").fetchone()
+    last_date = latest["d"] if latest and latest["d"] else ""
+    db.execute(
+        """INSERT INTO live_trade_accounts
+           (scheme, name, initial_capital, current_capital, bet_amount, N, K,
+            warn_threshold, tracking_nums, held, enter_date, state, wait_set,
+            last_processed_date, status, updated_at)
+           VALUES (?,?,?,?,?,?,?,500,'',0,'','BUY','',?, 'running', datetime('now','localtime'))
+           ON CONFLICT(scheme) DO UPDATE SET
+             initial_capital=excluded.initial_capital,
+             current_capital=excluded.current_capital,
+             bet_amount=excluded.bet_amount,
+             N=excluded.N, K=excluded.K,
+             warn_threshold=excluded.warn_threshold,
+             tracking_nums='', held=0, enter_date='', state='BUY', wait_set='',
+             last_processed_date=excluded.last_processed_date,
+             status='running', updated_at=datetime('now','localtime')""",
+        (scheme, p["name"], capital, capital, bet, p["N"], p["K"], last_date),
+    )
+    # 记流水
+    acc_id = db.execute("SELECT id FROM live_trade_accounts WHERE scheme=?", (scheme,)).fetchone()["id"]
+    db.execute(
+        "INSERT INTO live_trade_capital_log (account_id, change_type, amount, capital_before, capital_after, note) VALUES (?,?,?,?,?,?)",
+        (acc_id, "init", capital, 0, capital, f"初始化 {p['name']} 本金"),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM live_trade_accounts WHERE id=?", (acc_id,)).fetchone()
+    db.close()
+    return {"ok": True, "account": _live_account_row_to_dict(row)}
+
+
+@app.post("/api/live-trade/settle")
+def live_trade_settle(scheme: str = None):
+    """每日结算：把指定（或全部）账户推进到最新开奖日期。"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无开奖记录")
+    db = get_db()
+    if scheme:
+        rows = db.execute("SELECT * FROM live_trade_accounts WHERE scheme=?", (scheme,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM live_trade_accounts ORDER BY id").fetchall()
+
+    results = []
+    for row in rows:
+        acct = _live_account_row_to_dict(row)
+        p = live_trade_scheme_params(acct["scheme"])
+        engine_acct = {
+            "tracking_nums": acct["tracking_nums"],
+            "held": acct["held"],
+            "enter_date": acct["enter_date"],
+            "state": acct["state"],
+            "wait_set": acct["wait_set"],
+            "last_processed_date": acct["last_processed_date"],
+            "current_capital": acct["current_capital"],
+            "bet": acct["bet_amount"],
+            "N": acct["N"], "K": acct["K"],
+            "theta": p["theta"],
+        }
+        new_acct, orders = live_trade_advance(acct["scheme"], engine_acct, draws, dates)
+
+        # 落库订单
+        for o in orders:
+            db.execute(
+                """INSERT INTO live_trade_orders
+                   (account_id, trade_date, nums, bet_amount, day_cost, held, result, hit_num, round_pnl, capital_after)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(account_id, trade_date) DO UPDATE SET
+                     nums=excluded.nums, bet_amount=excluded.bet_amount, day_cost=excluded.day_cost,
+                     held=excluded.held, result=excluded.result, hit_num=excluded.hit_num,
+                     round_pnl=excluded.round_pnl, capital_after=excluded.capital_after""",
+                (acct["id"], o["trade_date"], json.dumps(o["nums"]), o["bet_amount"],
+                 o["day_cost"], o["held"], o["result"], o["hit_num"],
+                 o["round_pnl"], o["capital_after"]),
+            )
+
+        # 更新账户
+        new_status = _live_update_account_status(db, acct["id"], new_acct["current_capital"], acct["warn_threshold"])
+        db.execute(
+            """UPDATE live_trade_accounts SET
+                 current_capital=?, tracking_nums=?, held=?, enter_date=?, state=?, wait_set=?,
+                 last_processed_date=?, status=?, updated_at=datetime('now','localtime')
+               WHERE id=?""",
+            (new_acct["current_capital"], json.dumps(new_acct["tracking_nums"]), new_acct["held"],
+             new_acct["enter_date"], new_acct["state"], json.dumps(new_acct["wait_set"]),
+             new_acct["last_processed_date"], new_status, acct["id"]),
+        )
+
+        results.append({
+            "scheme": acct["scheme"], "name": acct["name"],
+            "new_orders": len(orders),
+            "capital": new_acct["current_capital"],
+            "status": new_status,
+            "tracking": new_acct["tracking_nums"],
+            "held": new_acct["held"],
+            "last_processed_date": new_acct["last_processed_date"],
+        })
+    db.commit()
+    db.close()
+    return {"ok": True, "results": results, "latest_data_date": dates[-1]}
+
+
+@app.post("/api/live-trade/deposit")
+def live_trade_deposit(scheme: str, amount: float):
+    """增加本金（破产后可追加）。"""
+    if amount <= 0:
+        raise HTTPException(400, "追加金额需大于 0")
+    db = get_db()
+    row = db.execute("SELECT * FROM live_trade_accounts WHERE scheme=?", (scheme,)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, f"账户 {scheme} 不存在，请先初始化")
+    before = row["current_capital"]
+    after = round(before + amount, 2)
+    db.execute("UPDATE live_trade_accounts SET current_capital=?, updated_at=datetime('now','localtime') WHERE id=?", (after, row["id"]))
+    new_status = _live_update_account_status(db, row["id"], after, row["warn_threshold"])
+    db.execute(
+        "INSERT INTO live_trade_capital_log (account_id, change_type, amount, capital_before, capital_after, note) VALUES (?,?,?,?,?,?)",
+        (row["id"], "deposit", amount, before, after, "手动追加本金"),
+    )
+    db.commit()
+    fresh = db.execute("SELECT * FROM live_trade_accounts WHERE id=?", (row["id"],)).fetchone()
+    db.close()
+    return {"ok": True, "account": _live_account_row_to_dict(fresh)}
+
+
+@app.get("/api/live-trade/orders")
+def live_trade_orders(scheme: str = None, limit: int = 200):
+    """实盘订单明细（按日期倒序）。"""
+    db = get_db()
+    if scheme:
+        rows = db.execute(
+            "SELECT o.*, a.scheme, a.name FROM live_trade_orders o JOIN live_trade_accounts a ON a.id=o.account_id WHERE a.scheme=? ORDER BY o.trade_date DESC LIMIT ?",
+            (scheme, limit)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT o.*, a.scheme, a.name FROM live_trade_orders o JOIN live_trade_accounts a ON a.id=o.account_id ORDER BY o.trade_date DESC LIMIT ?",
+            (limit,)).fetchall()
+    db.close()
+    out = []
+    for r in rows:
+        out.append({
+            "trade_date": r["trade_date"], "scheme": r["scheme"], "name": r["name"],
+            "nums": json.loads(r["nums"]) if r["nums"] else [],
+            "bet_amount": r["bet_amount"], "day_cost": r["day_cost"], "held": r["held"],
+            "result": r["result"], "hit_num": r["hit_num"],
+            "round_pnl": r["round_pnl"], "capital_after": r["capital_after"],
+        })
+    return {"orders": out}
+
+
+@app.get("/api/live-trade/capital-log")
+def live_trade_capital_log(scheme: str = None, limit: int = 50):
+    """本金流水（初始化/追加）。"""
+    db = get_db()
+    if scheme:
+        rows = db.execute(
+            "SELECT c.*, a.scheme, a.name FROM live_trade_capital_log c JOIN live_trade_accounts a ON a.id=c.account_id WHERE a.scheme=? ORDER BY c.id DESC LIMIT ?",
+            (scheme, limit)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT c.*, a.scheme, a.name FROM live_trade_capital_log c JOIN live_trade_accounts a ON a.id=c.account_id ORDER BY c.id DESC LIMIT ?",
+            (limit,)).fetchall()
+    db.close()
+    return {"logs": [{"id": r["id"], "scheme": r["scheme"], "name": r["name"],
+                      "change_type": r["change_type"], "amount": r["amount"],
+                      "capital_before": r["capital_before"], "capital_after": r["capital_after"],
+                      "note": r["note"], "created_at": r["created_at"]} for r in rows]}
 
 
 # 认证中间件（在 StripPrefix 之前添加，使其在外层先剥离前缀）

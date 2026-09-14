@@ -279,6 +279,10 @@
             <button class="btn-cancel" style="font-size:13px" @click="loadTrackingRuns()">🔄 刷新</button>
             <button class="btn-cancel" style="font-size:13px" @click="openAlgoDoc()">📚 算法文档</button>
             <button class="btn-cancel" style="font-size:13px" @click="openTrackingHold()">🎯 跟踪持有</button>
+            <button class="btn-cancel" style="font-size:13px" @click="openCold8Alert()">🔔 失效预警</button>
+            <button class="btn-cancel" style="font-size:13px" @click="openScheme('cold1')">📋 最冷1号明细</button>
+            <button class="btn-cancel" style="font-size:13px" @click="openScheme('multi8')">📋 前8号6期明细</button>
+            <button class="btn-add" style="font-size:13px" @click="openLiveTrade()">💼 实盘下单</button>
           </div>
           <div v-if="trackingRunsLoading" style="text-align:center;padding:20px">⏳ 加载中...</div>
           <div v-else-if="trackingRuns.length === 0" style="text-align:center;padding:24px;color:#64748b">
@@ -326,6 +330,7 @@
           <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
             <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="trackingTab='list'">← 返回列表</button>
             <span style="font-size:13px;color:#1a2a4a;font-weight:700">🎯 跟踪持有（冷号回补）</span>
+            <button class="btn-cancel" style="font-size:12px;padding:4px 10px;background:#f59e0b;color:#fff;border-color:#f59e0b" @click="openConclusion()">📄 结论</button>
           </div>
           <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
             <div style="display:flex;gap:4px">
@@ -416,6 +421,57 @@
           <div v-if="holdLive" style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
             <div style="font-size:12px;color:#64748b;margin-bottom:8px">📊 实盘纸面跟踪（最新 {{ holdLive.latest_record_date }}）</div>
 
+            <!-- 执行方案卡（可落地·照做即可） -->
+            <div style="padding:12px;background:linear-gradient(135deg,#f0fdf4,#dcfce7);border:1px solid #86efac;border-radius:10px;margin-bottom:10px">
+              <div style="font-size:13px;font-weight:700;color:#166534;margin-bottom:8px">📋 执行方案卡（等额平买 · 照做即可）</div>
+
+              <!-- 六条铁律 -->
+              <div style="font-size:11px;color:#14532d;line-height:1.9;background:#fff;padding:8px 10px;border-radius:6px;margin-bottom:8px">
+                <b>六条铁律</b><br>
+                ① 只跟最冷 1 号，gap 遗漏 ≥ {{ holdTheta }} 期进场<br>
+                ② 等额平买：每期固定注额，<b>永不倍投</b><br>
+                ③ 中即止盈：第 d 期中，净赚 47−d 元，立即离场<br>
+                ④ {{ holdK }} 期止损：未中认亏 {{ holdK }} 元离场<br>
+                ⑤ 仓位 1%：单轮风险 = 资金池 × 1%（凯利 7% 保守折）<br>
+                ⑥ 月度止损：当月累计亏到止损线，停手到下月
+              </div>
+
+              <!-- 今日执行状态 -->
+              <div style="font-size:12px;line-height:1.8;padding:8px 10px;border-radius:6px;margin-bottom:8px"
+                   :style="{background: holdTrackingStatus.state === 'holding' ? '#fef2f2' : '#f0fdf4', border:'1px solid ' + (holdTrackingStatus.state === 'holding' ? '#fecaca' : '#bbf7d0')}">
+                <template v-if="holdTrackingStatus.state === 'holding'">
+                  🔴 <b>正在跟踪 {{ pad2(holdTrackingStatus.num) }}</b> 号 · 第 <b>{{ holdTrackingStatus.held }}/{{ holdK }}</b> 期
+                  <span style="color:#64748b">（还剩 {{ holdTrackingStatus.remaining }} 期止损，每期 {{ holdBetSize.per }} 元）</span>
+                </template>
+                <template v-else>
+                  🟢 <b>空仓等待</b>
+                  <span v-if="holdLive.current.signal" style="color:#0f9f45">· 信号已到，今日号码 <b>{{ pad2(holdLive.current.coldest_num) }}</b>（遗漏 {{ holdLive.current.coldest_gap }} 期），可进场</span>
+                  <span v-else style="color:#64748b">· 遗漏未达 {{ holdTheta }} 期，继续等</span>
+                </template>
+              </div>
+
+              <!-- 仓位换算 -->
+              <div style="font-size:11px;color:#166534;line-height:1.8;background:#fff;padding:8px 10px;border-radius:6px">
+                资金池 <input type="number" v-model.number="holdBankroll" min="0" step="100" style="width:80px;padding:2px 6px;font-size:12px;border:1px solid #86efac;border-radius:6px;text-align:right"> 元
+                → 单轮风险 <b>{{ holdBetSize.risk }}</b> 元 · 单期注额 <b style="color:#0f9f45">{{ holdBetSize.per }}</b> 元<br>
+                <span style="color:#475569">扛实测最长 14 轮连亏需备 <b>{{ (holdBetSize.risk * 14).toFixed(0) }}</b> 元（建议再加一倍安全垫 ≈ {{ (holdBetSize.risk * 28).toFixed(0) }} 元）</span>
+              </div>
+            </div>
+
+            <!-- 停手信号 -->
+            <div style="padding:12px;border-radius:10px;margin-bottom:10px;border:1px solid"
+                 :style="{background: stopSignals.color === '#dc2626' ? '#fef2f2' : (stopSignals.color === '#d97706' ? '#fffbeb' : '#f0fdf4'), borderColor: stopSignals.color === '#dc2626' ? '#fecaca' : (stopSignals.color === '#d97706' ? '#fde68a' : '#bbf7d0')}">
+              <div style="font-size:13px;font-weight:700;margin-bottom:6px" :style="{color: stopSignals.color}">⚠️ 停手信号 — {{ stopSignals.verdict }}</div>
+              <div style="font-size:11px;color:#475569;line-height:1.8">
+                当前连亏 <b>{{ curLossStreak }}</b> 轮
+                <template v-if="stopSignals.count === 0">· 四项风控指标均正常，无停手信号</template>
+                <template v-else>· 触发 {{ stopSignals.count }} 项停手/降注信号：</template>
+              </div>
+              <div v-for="(s, i) in stopSignals.signals" :key="i" style="font-size:11px;margin-top:3px;line-height:1.6" :style="{color: s.level === 'red' ? '#dc2626' : '#d97706'}">
+                {{ s.level === 'red' ? '🔴' : '🟡' }} {{ s.text }}
+              </div>
+            </div>
+
             <!-- 下单指令卡 -->
             <div style="padding:12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-radius:10px;margin-bottom:10px">
               <div style="font-size:13px;font-weight:700;color:#1e40af;margin-bottom:8px">🎯 本期下单指令</div>
@@ -459,6 +515,94 @@
               <span v-for="(t, i) in holdLive.trail" :key="i" style="margin-right:6px">
                 {{ t.date.slice(5) }}·{{ t.num || '空' }}{{ t.event && t.event.type === 'hit' ? '✅' : (t.event && t.event.type === 'stop' ? '⛔' : '') }}
               </span>
+            </div>
+          </div>
+
+          <!-- 月度风控 -->
+          <div v-if="holdMonthly" style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
+            <div style="font-size:12px;color:#64748b;margin-bottom:8px">📅 月度风控（止损线 {{ holdMonthly.stop_limit }} 元）</div>
+            <div :style="{padding:'10px 12px',borderRadius:'8px',fontSize:'13px',fontWeight:'600',
+                 background: holdMonthly.stopped ? '#fef2f2' : '#f0fdf4',
+                 border:'1px solid ' + (holdMonthly.stopped ? '#fecaca' : '#bbf7d0')}">
+              <span :style="{color: holdMonthly.stopped ? '#dc2626' : '#0f9f45'}">
+                {{ holdMonthly.stopped ? '⛔ 本月已触发止损，停手！下月恢复' : '✅ 本月正常，可继续小注' }}
+              </span>
+              <span style="font-weight:400;color:#64748b;margin-left:4px">
+                （{{ holdMonthly.current_month }} 累计 {{ holdMonthly.current_month_pnl > 0 ? '+' : '' }}{{ holdMonthly.current_month_pnl }} 元 / 止损线 −{{ holdMonthly.stop_limit }} 元）
+              </span>
+            </div>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;max-height:80px;overflow-y:auto">
+              <div v-for="(m, i) in holdMonthly.monthly.slice(-12)" :key="i" style="font-size:10px;color:#64748b;padding:3px 6px;border-radius:4px"
+                   :style="{background: m.pnl >= 0 ? 'rgba(15,159,69,0.08)' : 'rgba(239,68,68,0.08)'}">
+                {{ m.month.slice(5) }}<br><b :style="{color: m.pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ m.pnl > 0 ? '+' : '' }}{{ m.pnl }}</b>
+              </div>
+            </div>
+          </div>
+
+          <!-- 前8最冷号·6期周期明细 -->
+          <div style="margin-top:6px;border-top:1px dashed #e0e0e0;padding-top:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <span style="font-size:12px;color:#1a2a4a;font-weight:700">📋 前8最冷号·6期周期</span>
+              <input type="date" v-model="mtStartDate" class="form-input" style="width:132px;padding:4px 6px;font-size:12px">
+              <span style="font-size:12px;color:#94a3b8">至</span>
+              <input type="date" v-model="mtEndDate" class="form-input" style="width:132px;padding:4px 6px;font-size:12px">
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="loadMultiTrack()">查询</button>
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="mtStartDate='';mtEndDate='';loadMultiTrack()">全部</button>
+            </div>
+            <div v-if="mtLoading" style="text-align:center;color:#94a3b8;padding:10px">⏳ 加载中...</div>
+            <div v-else-if="multiTrack">
+              <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+                <div class="tracking-stat" style="flex:1;min-width:80px">
+                  <div class="tracking-stat-value" style="color:#1a2a4a">{{ multiTrack.summary.total }}</div>
+                  <div class="tracking-stat-label">轮数</div>
+                </div>
+                <div class="tracking-stat" style="flex:1;min-width:80px">
+                  <div class="tracking-stat-value" style="color:#1a2a4a">{{ multiTrack.summary.hit_rate }}%</div>
+                  <div class="tracking-stat-label">命中率（{{ multiTrack.summary.hits }}中/{{ multiTrack.summary.stops }}停）</div>
+                </div>
+                <div class="tracking-stat" style="flex:1;min-width:80px">
+                  <div class="tracking-stat-value" :style="{color: multiTrack.summary.total_pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ multiTrack.summary.total_pnl }}</div>
+                  <div class="tracking-stat-label">总盈亏</div>
+                </div>
+              </div>
+
+              <!-- 停手信号（前8号方案） -->
+              <div style="padding:10px 12px;border-radius:8px;margin-bottom:10px;border:1px solid"
+                   :style="{background: multiStopSignals.color === '#dc2626' ? '#fef2f2' : (multiStopSignals.color === '#d97706' ? '#fffbeb' : '#f0fdf4'), borderColor: multiStopSignals.color === '#dc2626' ? '#fecaca' : (multiStopSignals.color === '#d97706' ? '#fde68a' : '#bbf7d0')}">
+                <div style="font-size:12px;font-weight:700;margin-bottom:4px" :style="{color: multiStopSignals.color}">⚠️ 停手信号 — {{ multiStopSignals.verdict }}</div>
+                <div style="font-size:11px;color:#475569;line-height:1.7">
+                  当前连亏 <b>{{ multiStopSignals.curLossStreak }}</b> 轮（每轮止损 {{ 8 * 6 }} 元）
+                  <template v-if="multiStopSignals.count === 0">· 三项风控指标均正常，无停手信号</template>
+                </div>
+                <div v-for="(s, i) in multiStopSignals.signals" :key="i" style="font-size:11px;margin-top:3px;line-height:1.6" :style="{color: s.level === 'red' ? '#dc2626' : '#d97706'}">
+                  {{ s.level === 'red' ? '🔴' : '🟡' }} {{ s.text }}
+                </div>
+              </div>
+
+              <div style="max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px">
+                <table style="width:100%;border-collapse:collapse;font-size:11px">
+                  <thead>
+                    <tr style="background:#f8fafc;color:#64748b;position:sticky;top:0">
+                      <th style="padding:5px 4px;text-align:left">进场日期</th>
+                      <th style="padding:5px 4px;text-align:left">8个号(遗)</th>
+                      <th style="padding:5px 4px;text-align:left">结果</th>
+                      <th style="padding:5px 4px;text-align:right">盈亏</th>
+                      <th style="padding:5px 4px;text-align:right">累计</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(r, i) in multiTrack.rounds" :key="i" style="border-bottom:1px solid #f1f5f9">
+                      <td style="padding:4px;color:#64748b;white-space:nowrap">{{ r.enter_date }}</td>
+                      <td style="padding:4px;color:#1a2a4a">{{ r.num_list.map(n => pad2(n)).join('.') }}</td>
+                      <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : '#ef4444'}">
+                        {{ r.result==='hit' ? '第'+r.held+'期中'+pad2(r.hit_num) : '6期未中·止损' }}
+                      </td>
+                      <td style="padding:4px;text-align:right" :style="{color: r.pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ r.pnl > 0 ? '+' : '' }}{{ r.pnl }}</td>
+                      <td style="padding:4px;text-align:right;color:#64748b">{{ r.cum_pnl }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
@@ -511,6 +655,49 @@
                 <span style="color:#94a3b8;flex:1 1 auto;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">遗{{ r.enter_gap }}·跟{{ r.held }}期</span>
                 <span :style="{color: r.result==='hit' ? '#0f9f45' : '#ef4444', flex:'0 0 auto', whiteSpace:'nowrap'}">{{ r.result==='hit' ? '✅' : '⛔' }}{{ r.pnl > 0 ? '+' : '' }}{{ r.pnl }}</span>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 最冷8码 失效预警 -->
+        <div v-else-if="trackingTab === 'cold8alert'">
+          <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+            <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="trackingTab='list'">← 返回列表</button>
+            <span style="font-size:13px;color:#1a2a4a;font-weight:700">🔔 最冷8码 失效预警</span>
+          </div>
+          <div v-if="cold8Loading" style="text-align:center;padding:20px">⏳ 加载中...</div>
+          <div v-else-if="cold8Alert">
+            <div :style="{
+              padding:'14px',borderRadius:'10px',marginBottom:'12px',
+              background: cold8Alert.level==='red' ? '#fef2f2' : cold8Alert.level==='yellow' ? '#fffbeb' : '#f0fdf4',
+              borderLeft: '4px solid ' + (cold8Alert.level==='red' ? '#dc2626' : cold8Alert.level==='yellow' ? '#f59e0b' : '#16a34a')
+            }">
+              <div :style="{fontSize:'16px',fontWeight:700,color: cold8Alert.level==='red' ? '#dc2626' : cold8Alert.level==='yellow' ? '#d97706' : '#16a34a'}">
+                {{ cold8Alert.level==='red' ? '🔴' : cold8Alert.level==='yellow' ? '🟡' : '🟢' }} {{ cold8Alert.advice.text }}
+              </div>
+              <div style="font-size:12px;color:#64748b;margin-top:4px">
+                连续 {{ cold8Alert.consec_miss }} 期未命中 · 滚动{{ cold8Alert.rolling_window }}期命中率 {{ cold8Alert.rolling_rate }}%（基线 {{ cold8Alert.baseline }}%）
+              </div>
+            </div>
+            <div style="margin-bottom:12px">
+              <div style="font-size:12px;color:#64748b;margin-bottom:6px">当前最冷8码（遗漏降序）</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <span v-for="p in cold8Alert.current_picks" :key="p.num" style="padding:4px 10px;background:#1a2a4a;color:#fff;border-radius:6px;font-size:13px;font-weight:700">
+                  {{ pad2(p.num) }}<span style="font-size:10px;color:#94a3b8;font-weight:400"> 遗{{ p.gap }}</span>
+                </span>
+              </div>
+            </div>
+            <div v-if="cold8Alert.trail && cold8Alert.trail.length" style="margin-bottom:12px">
+              <div style="font-size:12px;color:#64748b;margin-bottom:6px">最近{{ cold8Alert.trail.length }}期命中轨迹（<span style="color:#16a34a">绿=命中</span> <span style="color:#cbd5e1">灰=未中</span>）</div>
+              <div style="display:flex;flex-wrap:wrap;gap:3px">
+                <span v-for="(t, i) in cold8Alert.trail" :key="i"
+                      :style="{width:'14px',height:'14px',borderRadius:'3px',background: t.hit ? '#16a34a' : '#e2e8f0'}"
+                      :title="t.date + (t.hit ? ' 命中' : ' 未中')"></span>
+              </div>
+              <div style="font-size:11px;color:#94a3b8;margin-top:4px">{{ cold8Alert.trail[0].date }} ~ {{ cold8Alert.trail[cold8Alert.trail.length-1].date }}</div>
+            </div>
+            <div style="padding:10px 12px;background:#f8fafc;border-left:3px solid #94a3b8;border-radius:8px;font-size:12px;line-height:1.8;color:#475569">
+              ⚠️ 本预警是「状态监控」而非「预测」：冷号8码全量无真实 edge（z=0.80），命中率随机波动，低迷期（滚动命中率掉到 6%~12%）无法提前预知。预警只在命中率已明显偏低时提示暂停，帮你避开低迷段的持续亏损。
             </div>
           </div>
         </div>
@@ -1851,6 +2038,256 @@
     <!-- Toast 通知 -->
     <div v-if="toast.show" class="toast" :class="{ error: toast.isError }">{{ toast.msg }}</div>
 
+    <!-- 结论文档弹窗 -->
+    <div v-if="conclusionVisible" class="form-overlay" @click.self="conclusionVisible=false">
+      <div class="form-card" style="max-width:760px;max-height:90vh;overflow-y:auto;text-align:left">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;position:sticky;top:0;background:#fff;padding:4px 0;z-index:1">
+          <span style="font-weight:700;color:#1a2a4a;font-size:15px">📄 冷号回补策略 · 完整研究结论</span>
+          <button class="btn-cancel" style="font-size:13px;padding:2px 8px" @click="conclusionVisible=false">✕</button>
+        </div>
+        <div v-if="conclusionLoading" style="text-align:center;color:#94a3b8;padding:20px">⏳ 加载中...</div>
+        <div v-else class="conclusion-body" v-html="conclusionContent"></div>
+      </div>
+    </div>
+
+    <!-- 方案明细弹框 -->
+    <div v-if="schemeDialog.visible" class="form-overlay" @click.self="schemeDialog.visible=false">
+      <div class="form-card" style="max-width:760px;max-height:90vh;overflow-y:auto;text-align:left">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;position:sticky;top:0;background:#fff;padding:4px 0;z-index:1">
+          <span style="font-weight:700;color:#1a2a4a;font-size:15px">
+            {{ schemeDialog.type === 'cold1' ? '📋 最冷1号 · 跟踪持有明细' : '📋 前8最冷号 · 6期周期明细' }}
+          </span>
+          <button class="btn-cancel" style="font-size:13px;padding:2px 8px" @click="schemeDialog.visible=false">✕</button>
+        </div>
+
+        <!-- 当天号码 -->
+        <div v-if="schemeDialog.type === 'cold1' && holdLive && holdLive.current" style="padding:10px 12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-radius:8px;margin-bottom:10px;font-size:12px;color:#1e40af">
+          <b>🎯 当天号码：</b><span style="font-weight:800;font-size:18px">{{ pad2(holdLive.current.coldest_num) }}</span>
+          <span style="color:#64748b;margin-left:6px">（遗漏 {{ holdLive.current.coldest_gap }} 期）</span>
+        </div>
+        <!-- 进行中跟踪（已跟几天） -->
+        <div v-if="schemeDialog.type === 'cold1' && schemeData && schemeData.in_progress" style="padding:10px 12px;background:#fefce8;border:1px solid #fde68a;border-radius:8px;margin-bottom:10px;font-size:12px;color:#713f12">
+          <div style="font-weight:700;margin-bottom:2px">🔴 正在跟踪 {{ pad2(schemeData.in_progress.num) }} 号</div>
+          <div style="color:#b45309;font-weight:700">📅 已跟 {{ schemeData.in_progress.held }} 期<span v-if="schemeData.in_progress.enter_date">（{{ schemeData.in_progress.enter_date }} 进场）</span></div>
+          <div style="color:#92400e">距止损还剩 {{ schemeData.in_progress.remaining }} 期（跟踪 {{ schemeData.in_progress.held }}/12 期）</div>
+        </div>
+        <div v-else-if="schemeDialog.type === 'multi8' && schemeData && schemeData.current" style="padding:10px 12px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-radius:8px;margin-bottom:10px;font-size:12px;color:#1e40af">
+          <b>🎯 当天号码：</b><span style="font-weight:800;font-size:14px">{{ schemeData.current.nums.map(n => pad2(n)).join('.') }}</span>
+          <span style="color:#64748b;margin-left:6px">（遗漏 {{ schemeData.current.gaps.join('/') }} 期）</span>
+        </div>
+
+        <!-- 日期段查询 -->
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <input type="date" v-model="schemeStart" class="form-input" style="width:132px;padding:4px 6px;font-size:12px">
+          <span style="font-size:12px;color:#94a3b8">至</span>
+          <input type="date" v-model="schemeEnd" class="form-input" style="width:132px;padding:4px 6px;font-size:12px">
+          <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="loadScheme()">查询</button>
+          <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="schemeStart='';schemeEnd='';loadScheme()">全部</button>
+        </div>
+
+        <!-- 当前统计日期段（明确标注，避免误解） -->
+        <div style="padding:8px 12px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:10px;font-size:12px;color:#334155;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-weight:700;color:#1a2a4a">📅 统计日期段：</span>
+          <span style="font-weight:800;color:#1d4ed8">{{ schemeStart || '最早' }}</span>
+          <span style="color:#94a3b8">→</span>
+          <span style="font-weight:800;color:#1d4ed8">{{ schemeEnd || '最新' }}</span>
+          <span style="color:#94a3b8">（按「进场日期」筛选，{{ schemeEnd || '最新' }} 当天进场的进行中轮次含在内）</span>
+        </div>
+
+        <div v-if="schemeLoading" style="text-align:center;color:#94a3b8;padding:20px">⏳ 加载中...</div>
+        <div v-else-if="schemeData">
+          <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+            <div class="tracking-stat" style="flex:1;min-width:80px">
+              <div class="tracking-stat-value" style="color:#1a2a4a">{{ schemeData.summary.total }}</div>
+              <div class="tracking-stat-label">轮数</div>
+            </div>
+            <div class="tracking-stat" style="flex:1;min-width:80px">
+              <div class="tracking-stat-value" style="color:#1a2a4a">{{ schemeData.summary.hit_rate }}%</div>
+              <div class="tracking-stat-label">命中率（{{ schemeData.summary.hits }}中）</div>
+            </div>
+            <div class="tracking-stat" style="flex:1;min-width:80px">
+              <div class="tracking-stat-value" :style="{color: schemeData.summary.total_pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ schemeData.summary.total_pnl }}</div>
+              <div class="tracking-stat-label">总盈亏</div>
+            </div>
+          </div>
+          <!-- 最长期数 Top10（cold1 才显示）-->
+          <div v-if="schemeDialog.type === 'cold1' && schemeTopGap.length" style="margin-bottom:10px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px">
+            <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:6px">📊 最长期数 Top10（点击看期号+日期）</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              <button v-for="(g, i) in schemeTopGap" :key="i" @click="gapTopDialog = g"
+                style="padding:4px 8px;background:#fff;border:1px solid #fde68a;border-radius:8px;font-size:11px;cursor:pointer;color:#92400e">
+                <span style="font-weight:600">#{{ i+1 }}</span> {{ pad2(g.num) }} <b style="color:#b45309">{{ g.total_gap }}期</b>
+              </button>
+            </div>
+          </div>
+          <div style="max-height:360px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px">
+            <table style="width:100%;border-collapse:collapse;font-size:11px">
+              <thead>
+                <tr style="background:#f8fafc;color:#64748b;position:sticky;top:0">
+                  <th style="padding:5px 4px;text-align:left">进场日期</th>
+                  <th style="padding:5px 4px;text-align:left">{{ schemeDialog.type === 'cold1' ? '号码' : '8个号' }}</th>
+                  <th style="padding:5px 4px;text-align:left">结果</th>
+                  <th style="padding:5px 4px;text-align:right">最长期数</th>
+                  <th style="padding:5px 4px;text-align:right">盈亏</th>
+                  <th style="padding:5px 4px;text-align:right">累计</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, i) in schemePaged" :key="i" style="border-bottom:1px solid #f1f5f9">
+                  <td style="padding:4px;color:#64748b;white-space:nowrap">{{ r.enter_date }}</td>
+                  <td style="padding:4px;color:#1a2a4a">
+                    <template v-if="schemeDialog.type === 'cold1'">{{ pad2(r.num) }}</template>
+                    <template v-else>{{ r.num_list.map(n => pad2(n)).join('.') }}</template>
+                  </td>
+                  <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : r.result==='holding' ? '#1e40af' : '#ef4444'}">
+                    <template v-if="schemeDialog.type === 'cold1'">{{ r.result==='hit' ? '第'+r.held+'期中' : r.result==='holding' ? '进行中·第'+r.held+'期' : '止损' }}</template>
+                    <template v-else>{{ r.result==='hit' ? '第'+r.held+'期中'+pad2(r.hit_num) : '止损' }}</template>
+                  </td>
+                  <td style="padding:4px;text-align:right;color:#b45309;font-weight:600">{{ r.total_gap }}</td>
+                  <td style="padding:4px;text-align:right" :style="{color: r.result==='holding' ? '#94a3b8' : (r.pnl >= 0 ? '#0f9f45' : '#ef4444')}">{{ r.result==='holding' ? '—' : ((r.pnl > 0 ? '+' : '') + r.pnl) }}</td>
+                  <td style="padding:4px;text-align:right;color:#64748b">{{ r.cum_pnl }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 分页 -->
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#64748b">
+              <span>每页</span>
+              <select v-model.number="schemePageSize" @change="schemePage=1" style="padding:3px 6px;font-size:12px;border:1px solid #e0e0e0;border-radius:6px">
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+                <option :value="400">400</option>
+              </select>
+              <span>条</span>
+              <span style="margin-left:6px">共 {{ schemeRounds.length }} 条 / {{ schemeTotalPages }} 页</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px" :disabled="schemePage<=1" @click="schemePage--">‹ 上一页</button>
+              <span style="font-size:12px;color:#1a2a4a;font-weight:600">{{ schemePage }} / {{ schemeTotalPages }}</span>
+              <button class="btn-cancel" style="font-size:12px;padding:4px 10px" :disabled="schemePage>=schemeTotalPages" @click="schemePage++">下一页 ›</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 最长期数详情弹框 -->
+    <div v-if="gapTopDialog" class="form-overlay" @click.self="gapTopDialog=null">
+      <div class="form-card" style="max-width:420px;text-align:left">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-weight:700;color:#1a2a4a;font-size:15px">📊 最长期数详情</span>
+          <button class="btn-cancel" style="font-size:13px;padding:2px 8px" @click="gapTopDialog=null">✕</button>
+        </div>
+        <div style="text-align:center;padding:14px;background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fde68a;border-radius:10px;margin-bottom:12px">
+          <div style="font-size:12px;color:#92400e">号码 {{ pad2(gapTopDialog.num) }}</div>
+          <div style="font-size:30px;font-weight:800;color:#b45309;margin:4px 0">{{ gapTopDialog.total_gap }} 期</div>
+          <div style="font-size:12px;color:#92400e">当时开出的最长期数</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:10px 12px;font-size:12px;color:#1a2a4a;line-height:2">
+          <div>📅 进场日期：<b>{{ gapTopDialog.enter_date }}</b>（期号 {{ gapTopDialog.enter_day_seq }}）</div>
+          <div>🏁 结束日期：<b>{{ gapTopDialog.end_date }}</b>（期号 {{ gapTopDialog.end_day_seq }}）</div>
+          <div>📉 进场时已遗漏：{{ gapTopDialog.enter_gap }} 期</div>
+          <div>🎯 跟踪期数：{{ gapTopDialog.held }} 期</div>
+          <div>📊 结果：<b :style="{color: gapTopDialog.result==='hit' ? '#0f9f45' : '#ef4444'}">{{ gapTopDialog.result==='hit' ? '第'+gapTopDialog.held+'期中（命中）' : '止损' }}</b></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 实盘下单执行弹窗 -->
+    <div v-if="liveTradeDialog.visible" class="form-overlay" @click.self="liveTradeDialog.visible=false">
+      <div class="form-card" style="max-width:760px;max-height:92vh;overflow-y:auto;text-align:left">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;position:sticky;top:0;background:#fff;padding:4px 0;z-index:1">
+          <span style="font-weight:700;color:#1a2a4a;font-size:15px">💼 实盘下单执行</span>
+          <button class="btn-cancel" style="font-size:13px;padding:2px 8px" @click="liveTradeDialog.visible=false">✕</button>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <button class="btn-cancel" style="font-size:12px;padding:4px 10px" @click="loadLiveTrade()">🔄 刷新</button>
+          <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="liveTradeSettle()">⚡ 每日结算</button>
+        </div>
+
+        <div v-if="liveTradeLoading" style="text-align:center;color:#94a3b8;padding:20px">⏳ 加载中...</div>
+        <div v-else>
+          <!-- 账户卡片 -->
+          <div v-for="a in liveAccounts" :key="a.scheme" style="border:1px solid #e0e0e0;border-radius:10px;padding:12px;margin-bottom:12px"
+               :style="{background: a.status==='bankrupt' ? '#fef2f2' : a.status==='warn' ? '#fffbeb' : '#fff'}">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+              <div>
+                <div style="font-weight:700;color:#1a2a4a;font-size:14px">{{ a.name }}</div>
+                <div style="font-size:11px;color:#64748b;margin-top:2px">每号 {{ a.bet_amount }} 元 × {{ a.N }} 号 · 跟踪 {{ a.K }} 期</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:24px;font-weight:800" :style="{color: a.current_capital >= a.initial_capital ? '#0f9f45' : a.current_capital <= 0 ? '#ef4444' : '#b45309'}">
+                  {{ a.current_capital }}
+                </div>
+                <div style="font-size:11px;color:#64748b">本金（初始 {{ a.initial_capital }}）</div>
+              </div>
+            </div>
+
+            <!-- 状态徽标 + 预警 -->
+            <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <span v-if="a.status==='bankrupt'" style="font-size:11px;padding:2px 8px;background:#fee2e2;color:#b91c1c;border-radius:6px;font-weight:700">💀 已破产</span>
+              <span v-else-if="a.status==='warn'" style="font-size:11px;padding:2px 8px;background:#fef3c7;color:#b45309;border-radius:6px;font-weight:700">⚠️ 本金低于 {{ a.warn_threshold }}</span>
+              <span v-else style="font-size:11px;padding:2px 8px;background:#dcfce7;color:#15803d;border-radius:6px;font-weight:700">✅ 正常</span>
+
+              <span v-if="a.tracking_nums && a.tracking_nums.length" style="font-size:11px;color:#1e40af;background:#dbeafe;padding:2px 8px;border-radius:6px">
+                🔴 跟踪中 {{ a.tracking_nums.map(n => pad2(n)).join('.') }} · 第 {{ a.held }}/{{ a.K }} 期
+              </span>
+              <span v-else-if="a.state==='WAIT'" style="font-size:11px;color:#64748b;background:#f1f5f9;padding:2px 8px;border-radius:6px">
+                ⏸ 空仓等待（等 {{ (a.wait_set||[]).map(n=>pad2(n)).join('.') }} 开出）
+              </span>
+              <span v-else style="font-size:11px;color:#64748b;background:#f1f5f9;padding:2px 8px;border-radius:6px">🟢 空仓</span>
+            </div>
+
+            <!-- 操作：增加本金 -->
+            <div v-if="a.status==='bankrupt' || a.status==='warn'" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="number" v-model.number="depositAmount[a.scheme]" placeholder="追加本金金额"
+                     class="form-input" style="width:130px;padding:4px 6px;font-size:12px">
+              <button class="btn-add" style="font-size:12px;padding:4px 12px" @click="liveTradeDeposit(a.scheme)">💰 增加本金</button>
+              <span style="font-size:11px;color:#64748b">追加后本金 = {{ a.current_capital }} + 追加额</span>
+            </div>
+          </div>
+
+          <!-- 订单明细 -->
+          <div v-if="liveOrders.length" style="margin-top:4px">
+            <div style="font-size:13px;font-weight:700;color:#1a2a4a;margin-bottom:8px">📜 下单明细（最近 {{ liveOrders.length }} 条）</div>
+            <div style="max-height:320px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px">
+              <table style="width:100%;border-collapse:collapse;font-size:11px">
+                <thead>
+                  <tr style="background:#f8fafc;color:#64748b;position:sticky;top:0">
+                    <th style="padding:5px 4px;text-align:left">日期</th>
+                    <th style="padding:5px 4px;text-align:left">方案</th>
+                    <th style="padding:5px 4px;text-align:left">下单号</th>
+                    <th style="padding:5px 4px;text-align:right">投入</th>
+                    <th style="padding:5px 4px;text-align:right">结果</th>
+                    <th style="padding:5px 4px;text-align:right">盈亏</th>
+                    <th style="padding:5px 4px;text-align:right">本金</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(o, i) in liveOrders" :key="i" style="border-bottom:1px solid #f1f5f9">
+                    <td style="padding:4px;color:#64748b;white-space:nowrap">{{ o.trade_date }}</td>
+                    <td style="padding:4px;color:#1a2a4a">{{ o.name }}</td>
+                    <td style="padding:4px;color:#1a2a4a">{{ o.nums.map(n => pad2(n)).join('.') }}</td>
+                    <td style="padding:4px;text-align:right;color:#64748b">{{ o.day_cost }}</td>
+                    <td style="padding:4px;text-align:right;white-space:nowrap" :style="{color: o.result==='hit' ? '#0f9f45' : o.result==='stop' ? '#ef4444' : '#64748b'}">
+                      {{ o.result==='hit' ? '第'+o.held+'期中' : o.result==='stop' ? '止损' : '持有' }}
+                    </td>
+                    <td style="padding:4px;text-align:right" :style="{color: o.round_pnl==null ? '#94a3b8' : o.round_pnl>=0 ? '#0f9f45' : '#ef4444'}">
+                      {{ o.round_pnl==null ? '—' : (o.round_pnl>0?'+':'')+o.round_pnl }}
+                    </td>
+                    <td style="padding:4px;text-align:right;color:#1a2a4a;font-weight:600">{{ o.capital_after }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -2439,7 +2876,235 @@ const holdResult = ref(null)          // 跟踪持有分析结果
 const holdLoading = ref(false)
 const holdLive = ref(null)            // 实盘纸面跟踪（当前最冷号 + 最近轨迹）
 const holdRounds = ref(null)          // 实盘逐轮明细 + 汇总
+const holdMonthly = ref(null)         // 月度风控（按月盈亏 + 止损线）
+const holdBankroll = ref(1200)        // 资金池（元），用于仓位换算
+const cold8Alert = ref(null)          // 最冷8码失效预警
+const cold8Loading = ref(false)
+const multiTrack = ref(null)          // 8号6期周期明细
+const mtStartDate = ref('2025-01-01')   // 日期段起（默认 2025-01-01）
+const mtEndDate = ref('')             // 日期段止
+
+// ===== 执行方案卡：从实盘轨迹推断「当前跟踪状态」 =====
+// 规则：锁定最冷号后连续跟踪 12 期，命中止盈 / 12期止损，中即离场
+const holdTrackingStatus = computed(() => {
+  const trail = holdLive.value?.trail || []
+  const last = trail[trail.length - 1]
+  if (last && last.event && last.event.type === 'hold') {
+    // 正在跟踪中：event.num=跟踪号，event.delay=已跟踪期数
+    return {
+      state: 'holding',
+      num: last.event.num,
+      held: last.event.delay,
+      remaining: Math.max(0, holdK.value - last.event.delay),
+    }
+  }
+  return { state: 'idle' }
+})
+// 仓位换算：单轮风险(12期) = 资金池 × 1%（凯利7%的保守折）→ 单期注额
+const holdBetSize = computed(() => {
+  const risk = holdBankroll.value * 0.01        // 单轮最大风险
+  const per = risk / Math.max(1, holdK.value)    // 单期注额
+  return { risk: +risk.toFixed(2), per: +per.toFixed(2) }
+})
+
+// ===== 停手信号：什么时候「不适合再跟」 =====
+// 当前连亏轮数（从最近已完结轮往前数连续止损）
+const curLossStreak = computed(() => {
+  const rounds = holdRounds.value?.rounds || []
+  let streak = 0
+  for (let i = rounds.length - 1; i >= 0; i--) {
+    if (rounds[i].result === 'stop') streak++
+    else break
+  }
+  return streak
+})
+// 停手信号汇总（4 个独立硬指标，任一触发即降级）
+const stopSignals = computed(() => {
+  const signals = []
+  // ① 当月止损
+  if (holdMonthly.value?.stopped) signals.push({ key: 'monthly', level: 'red', text: '本月已触发月度止损线，停手到下月' })
+  // ② 跌破盈利门槛（近20轮命中率 < 盈亏平衡线）
+  const h = holdRounds.value?.health
+  const m = holdRounds.value?.metrics
+  if (h && m?.breakeven != null && h.recent20_rate < m.breakeven) signals.push({ key: 'breakeven', level: 'red', text: `近20轮命中率 ${h.recent20_rate}% 跌破成本线 ${m.breakeven}%，信号失效` })
+  // ③ 连续止损（当前连亏 ≥ 5 轮）
+  if (curLossStreak.value >= 5) signals.push({ key: 'streak', level: 'yellow', text: `当前已连亏 ${curLossStreak.value} 轮，注意回撤` })
+  // ④ 信号衰减（近20轮 < 全量）
+  if (h && h.ratio != null && h.ratio < 1) signals.push({ key: 'decay', level: 'yellow', text: `近20轮命中率 ${h.recent20_rate}% 低于全量 ${h.full_rate}%，信号偏弱` })
+  // 结论
+  const reds = signals.filter(s => s.level === 'red').length
+  const total = signals.length
+  let verdict, color
+  if (reds >= 1 || total >= 2) { verdict = '🔴 停手观察'; color = '#dc2626' }
+  else if (total === 1) { verdict = '🟡 谨慎降注'; color = '#d97706' }
+  else { verdict = '🟢 可继续小注'; color = '#0f9f45' }
+  return { signals, verdict, color, count: total }
+})
+// 前8号方案的停手信号（3 指标：跌破门槛/连亏/信号衰减）
+const multiStopSignals = computed(() => {
+  const h = multiTrack.value?.health
+  const m = multiTrack.value?.metrics
+  const signals = []
+  if (h && m?.breakeven != null && h.recent20_rate < m.breakeven) signals.push({ key: 'breakeven', level: 'red', text: `近20轮命中率 ${h.recent20_rate}% 跌破成本线 ${m.breakeven}%，信号失效` })
+  if (m?.cur_loss_streak != null && m.cur_loss_streak >= 3) signals.push({ key: 'streak', level: 'yellow', text: `当前已连亏 ${m.cur_loss_streak} 轮（每轮 -${8 * 6} 元），注意回撤` })
+  if (h && h.ratio != null && h.ratio < 1) signals.push({ key: 'decay', level: 'yellow', text: `近20轮命中率 ${h.recent20_rate}% 低于全量 ${h.full_rate}%，信号偏弱` })
+  const reds = signals.filter(s => s.level === 'red').length
+  const total = signals.length
+  let verdict, color
+  if (reds >= 1 || total >= 2) { verdict = '🔴 停手观察'; color = '#dc2626' }
+  else if (total === 1) { verdict = '🟡 谨慎降注'; color = '#d97706' }
+  else { verdict = '🟢 可继续小注'; color = '#0f9f45' }
+  return { signals, verdict, color, count: total, curLossStreak: m?.cur_loss_streak ?? 0 }
+})
+const mtLoading = ref(false)
+const schemeDialog = ref({ visible: false, type: '' })  // 方案明细弹框 type: cold1/multi8
+const schemeData = ref(null)         // 方案明细数据
+const schemeStart = ref('2025-01-01')  // 方案日期段起（默认 2025-01-01）
+const schemeEnd = ref('')            // 方案日期段止
+const schemeLoading = ref(false)
+const schemePage = ref(1)            // 当前页
+const schemePageSize = ref(100)      // 每页条数：50/100/400
+
+// 倒序明细（最近在上方）+ 分页
+const schemeRounds = computed(() => {
+  const all = schemeData.value?.rounds || []
+  return [...all].reverse()
+})
+const schemeTotalPages = computed(() => Math.max(1, Math.ceil(schemeRounds.value.length / schemePageSize.value)))
+const schemePaged = computed(() => {
+  const start = (schemePage.value - 1) * schemePageSize.value
+  return schemeRounds.value.slice(start, start + schemePageSize.value)
+})
+// 最长期数 Top10（按 total_gap 降序，取前10）
+const schemeTopGap = computed(() => {
+  const all = schemeData.value?.rounds || []
+  return [...all].sort((a, b) => (b.total_gap || 0) - (a.total_gap || 0)).slice(0, 10)
+})
+const gapTopDialog = ref(null)        // 点击 top10 后的期号+日期详情弹框
 const equityCanvas = ref(null)        // 资金曲线 Canvas
+const conclusionVisible = ref(false)  // 结论文档弹窗
+const conclusionContent = ref('')     // 渲染后的 HTML
+const conclusionLoading = ref(false)
+
+// ── 实盘下单执行 ──
+const liveTradeDialog = ref({ visible: false })
+const liveTradeLoading = ref(false)
+const liveAccounts = ref([])
+const liveOrders = ref([])
+const depositAmount = reactive({})     // 各方案追加本金输入
+
+async function openLiveTrade() {
+  liveTradeDialog.value.visible = true
+  await loadLiveTrade()
+}
+async function loadLiveTrade() {
+  liveTradeLoading.value = true
+  try {
+    const [accRes, ordRes] = await Promise.all([
+      apiFetch('/live-trade/accounts'),
+      apiFetch('/live-trade/orders?limit=100'),
+    ])
+    const accData = await accRes.json()
+    const ordData = await ordRes.json()
+    liveAccounts.value = accData.accounts || []
+    liveOrders.value = ordData.orders || []
+  } catch (e) {
+    liveAccounts.value = []
+    liveOrders.value = []
+  } finally {
+    liveTradeLoading.value = false
+  }
+}
+async function liveTradeSettle() {
+  const res = await apiFetch('/live-trade/settle', { method: 'POST' })
+  const data = await res.json()
+  if (data.ok) {
+    alert('结算完成：' + data.results.map(r => `${r.name} 本金 ${r.capital}（${r.status}）`).join('；'))
+    await loadLiveTrade()
+  }
+}
+async function liveTradeDeposit(scheme) {
+  const amount = depositAmount[scheme]
+  if (!amount || amount <= 0) { alert('请输入追加金额'); return }
+  const res = await apiFetch(`/live-trade/deposit?scheme=${scheme}&amount=${amount}`, { method: 'POST' })
+  const data = await res.json()
+  if (data.ok) {
+    depositAmount[scheme] = null
+    alert(`已追加 ${amount} 元，${data.account.name} 本金现为 ${data.account.current_capital}`)
+    await loadLiveTrade()
+  }
+}
+
+async function openConclusion() {
+  conclusionVisible.value = true
+  conclusionLoading.value = true
+  conclusionContent.value = ''
+  try {
+    const res = await apiFetch('/conclusion')
+    const data = await res.json()
+    if (data.ok) {
+      conclusionContent.value = renderMarkdown(data.content)
+    } else {
+      conclusionContent.value = '<p style="color:#ef4444">加载失败</p>'
+    }
+  } catch (e) {
+    conclusionContent.value = '<p style="color:#ef4444">加载失败：' + escapeHtml(String(e.message || e)) + '</p>'
+  } finally {
+    conclusionLoading.value = false
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function inlineMd(s) {
+  return escapeHtml(s)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+?)`/g, '<code>$1</code>')
+}
+
+function renderMarkdown(md) {
+  const lines = String(md).split('\n')
+  let html = ''
+  let inTable = false, inCode = false, inList = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.startsWith('```')) {
+      if (inCode) { html += '</code></pre>'; inCode = false } else { html += '<pre><code>'; inCode = true }
+      continue
+    }
+    if (inCode) { html += escapeHtml(line) + '\n'; continue }
+    if (line.startsWith('|')) {
+      if (!inTable) { html += '<table>'; inTable = true }
+      const cells = line.split('|').slice(1, -1)
+      const isSep = cells.every(c => /^[-: ]+$/.test(c))
+      if (isSep) continue
+      const isHead = (i + 1 < lines.length) && lines[i + 1].startsWith('|') &&
+        lines[i + 1].split('|').slice(1, -1).every(c => /^[-: ]+$/.test(c))
+      const tag = isHead ? 'th' : 'td'
+      html += '<tr>' + cells.map(c => `<${tag}>${inlineMd(c.trim())}</${tag}>`).join('') + '</tr>'
+      continue
+    }
+    if (inTable) { html += '</table>'; inTable = false }
+    if (line.startsWith('### ')) { html += `<h3>${inlineMd(line.slice(4))}</h3>`; continue }
+    if (line.startsWith('## ')) { html += `<h2>${inlineMd(line.slice(3))}</h2>`; continue }
+    if (line.startsWith('# ')) { html += `<h1>${inlineMd(line.slice(2))}</h1>`; continue }
+    if (/^-{3,}$/.test(line.trim())) { html += '<hr>'; continue }
+    if (line.startsWith('> ')) { html += `<blockquote>${inlineMd(line.slice(2))}</blockquote>`; continue }
+    if (line.startsWith('- ')) {
+      if (!inList) { html += '<ul>'; inList = true }
+      html += `<li>${inlineMd(line.slice(2))}</li>`; continue
+    }
+    if (inList) { html += '</ul>'; inList = false }
+    if (line.trim() === '') continue
+    html += `<p>${inlineMd(line)}</p>`
+  }
+  if (inTable) html += '</table>'
+  if (inList) html += '</ul>'
+  if (inCode) html += '</code></pre>'
+  return html
+}
 
 async function openTracking() {
   showTracking.value = true
@@ -2572,6 +3237,22 @@ function openTrackingHold() {
   trackingTab.value = 'hold'
   if (!holdResult.value) analyzeTrackingHold()
   loadHoldLive()
+  loadMultiTrack()
+}
+function openCold8Alert() {
+  trackingTab.value = 'cold8alert'
+  loadCold8Alert()
+}
+async function loadCold8Alert() {
+  cold8Loading.value = true
+  try {
+    const res = await apiFetch('/cold8-alert/status?window=30&tail=60')
+    cold8Alert.value = await res.json()
+  } catch (e) {
+    $notify('失效预警加载失败：' + e.message, true)
+  } finally {
+    cold8Loading.value = false
+  }
 }
 async function analyzeTrackingHold() {
   holdLoading.value = true
@@ -2585,6 +3266,7 @@ async function analyzeTrackingHold() {
   }
   loadHoldLive()
   loadHoldRounds()
+  loadHoldMonthly()
 }
 async function loadHoldLive() {
   try {
@@ -2600,6 +3282,55 @@ async function loadHoldRounds() {
     holdRounds.value = await res.json()
   } catch (e) {
     holdRounds.value = null
+  }
+}
+async function loadHoldMonthly() {
+  try {
+    const res = await apiFetch(`/tracking-hold/monthly?theta=${holdTheta.value}&K=${holdK.value}&signal=${holdSignal.value}&min_votes=${holdMinVotes.value}&stop_limit=30`)
+    holdMonthly.value = await res.json()
+  } catch (e) {
+    holdMonthly.value = null
+  }
+}
+async function loadMultiTrack() {
+  mtLoading.value = true
+  try {
+    let url = '/multi-track-8/detail?N=8&K=6'
+    if (mtStartDate.value) url += '&start_date=' + mtStartDate.value
+    if (mtEndDate.value) url += '&end_date=' + mtEndDate.value
+    const res = await apiFetch(url)
+    multiTrack.value = await res.json()
+  } catch (e) {
+    multiTrack.value = null
+  } finally {
+    mtLoading.value = false
+  }
+}
+async function openScheme(type) {
+  schemeDialog.value = { visible: true, type }
+  schemeStart.value = '2025-01-01'
+  schemeEnd.value = ''
+  schemePage.value = 1
+  if (type === 'cold1') loadHoldLive()
+  await loadScheme()
+}
+async function loadScheme() {
+  schemeLoading.value = true
+  schemeData.value = null
+  schemePage.value = 1
+  try {
+    const type = schemeDialog.value.type
+    let url = type === 'cold1'
+      ? '/tracking-hold/rounds?theta=10&K=12&signal=gap&min_votes=4'
+      : '/multi-track-8/detail?N=8&K=6'
+    if (schemeStart.value) url += '&start_date=' + schemeStart.value
+    if (schemeEnd.value) url += '&end_date=' + schemeEnd.value
+    const res = await apiFetch(url)
+    schemeData.value = await res.json()
+  } catch (e) {
+    schemeData.value = null
+  } finally {
+    schemeLoading.value = false
   }
 }
 // 切换进场信号：自动调整阈值默认值
@@ -5014,4 +5745,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .tracking-table tbody tr:last-child td { border-bottom: none; }
 .tracking-row-win { background: rgba(52, 211, 153, 0.06); }
 .tracking-algo-name { text-align: left !important; font-weight: 600; color: #1a2a4a; white-space: normal !important; word-break: break-all; }
+
+/* 结论文档弹窗 */
+.conclusion-body { color: #1a2a4a; line-height: 1.7; font-size: 13px; }
+.conclusion-body h1 { font-size: 18px; margin: 12px 0 8px; color: #1a2a4a; }
+.conclusion-body h2 { font-size: 16px; margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; color: #1a2a4a; }
+.conclusion-body h3 { font-size: 14px; margin: 12px 0 6px; color: #1a2a4a; }
+.conclusion-body table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+.conclusion-body th, .conclusion-body td { border: 1px solid #e0e0e0; padding: 5px 8px; text-align: left; }
+.conclusion-body th { background: #f0f7ff; font-weight: 600; color: #1e3a5f; }
+.conclusion-body blockquote { border-left: 3px solid #3b82f6; background: #f0f7ff; padding: 8px 12px; margin: 8px 0; color: #1e3a5f; }
+.conclusion-body code { background: #f1f5f9; padding: 1px 5px; border-radius: 3px; font-size: 12px; color: #0f172a; }
+.conclusion-body pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 6px; overflow-x: auto; }
+.conclusion-body pre code { background: transparent; color: inherit; padding: 0; }
+.conclusion-body hr { border: none; border-top: 1px solid #e0e0e0; margin: 12px 0; }
+.conclusion-body ul { padding-left: 20px; margin: 6px 0; }
+.conclusion-body li { margin: 3px 0; }
+.conclusion-body p { margin: 6px 0; }
 </style>
