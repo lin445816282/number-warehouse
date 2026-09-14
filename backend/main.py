@@ -5753,7 +5753,7 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
         r["end_date"] = dates[r["end_idx"]] if r["end_idx"] < len(dates) else None
         r["enter_day_seq"] = day_seq_map.get(r["enter_date"])
         r["end_day_seq"] = day_seq_map.get(r["end_date"])
-        r["total_gap"] = r["enter_gap"] + r["held"]
+        r["total_gap"] = (r["enter_gap"] + r["held"]) if r["enter_gap"] is not None else None
         r.pop("enter_idx", None)
         r.pop("end_idx", None)
     # 全量 rounds（rolling/health/metrics 信号质量指标保持全量）

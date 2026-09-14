@@ -653,11 +653,14 @@ def tracking_hold_trail(draws, theta=10, K=12, warmup=100, tail=30, signal="gap"
     return trail
 
 
-def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_votes=4):
+def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_votes=4, stop_after_stops=3):
     """完整历史的每轮跟踪明细（实盘纸面跟踪）。
 
+    熔断规则：连续 stop_after_stops 轮止损（默认3轮，-K×3）后停止跟踪，
+    等待第3轮止损的号开出后重新开启新一轮。
+
     返回 [{num, enter_idx, enter_gap, held, result, pnl, end_idx}]，按进场时间排序。
-    result = "hit"（命中，pnl=47-held）/"stop"（止损，pnl=-K）。
+    result = "hit"（命中，pnl=47-held）/“stop”（止损，pnl=-K）/“halt”（熔断等待，pnl=0）。
     """
     M = len(draws)
     freq = {n: 0 for n in range(1, 50)}
@@ -685,9 +688,18 @@ def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_vo
     held = 0
     enter_idx = None
     enter_gap = None
+    consec_stops = 0
+    halted = False
+    halt_num = None
     for t in range(warmup, M):
         gap = {n: (t - last_seen_idx[n]) if last_seen_idx[n] >= 0 else t for n in range(1, 50)}
-        if tracking is None:
+        if halted:
+            # 熔断：连续 stop_after_stops 轮止损，等待 halt_num 开出后重新开启
+            if draws[t] == halt_num:
+                halted = False
+                consec_stops = 0
+                halt_num = None
+        elif tracking is None:
             if signal == "consensus":
                 tg = {x: (t - tail_last[x]) if tail_last[x] >= 0 else t for x in range(10)}
                 zg = {z: (t - zodiac_last[z]) if zodiac_last[z] >= 0 else t for z in zodiac_last}
@@ -723,11 +735,19 @@ def tracking_hold_rounds(draws, theta=10, K=12, warmup=100, signal="gap", min_vo
                 rounds.append({"num": tracking, "enter_idx": enter_idx, "enter_gap": enter_gap,
                                "held": held, "result": "hit", "pnl": pnl, "end_idx": t})
                 tracking = None
+                consec_stops = 0
             elif held >= K:
                 pnl = -K
+                stop_num = tracking
                 rounds.append({"num": tracking, "enter_idx": enter_idx, "enter_gap": enter_gap,
                                "held": held, "result": "stop", "pnl": pnl, "end_idx": t})
                 tracking = None
+                consec_stops += 1
+                if consec_stops >= stop_after_stops:
+                    halted = True
+                    halt_num = stop_num
+                    rounds.append({"num": stop_num, "enter_idx": t, "enter_gap": None,
+                                   "held": 0, "result": "halt", "pnl": 0, "end_idx": t})
         d = draws[t]
         freq[d] += 1
         if last_seen_idx[d] >= 0:

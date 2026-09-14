@@ -2139,12 +2139,12 @@
                     <template v-if="schemeDialog.type === 'cold1'">{{ pad2(r.num) }}</template>
                     <template v-else>{{ r.num_list.map(n => pad2(n)).join('.') }}</template>
                   </td>
-                  <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : r.result==='holding' ? '#1e40af' : '#ef4444'}">
-                    <template v-if="schemeDialog.type === 'cold1'">{{ r.result==='hit' ? '第'+r.held+'期中' : r.result==='holding' ? '进行中·第'+r.held+'期' : '止损' }}</template>
+                  <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : r.result==='holding' ? '#1e40af' : r.result==='halt' ? '#f59e0b' : '#ef4444'}">
+                    <template v-if="schemeDialog.type === 'cold1'">{{ r.result==='hit' ? '第'+r.held+'期中' : r.result==='holding' ? '进行中·第'+r.held+'期' : r.result==='halt' ? '熔断等待' : '止损' }}</template>
                     <template v-else>{{ r.result==='hit' ? '第'+r.held+'期中'+pad2(r.hit_num) : '止损' }}</template>
                   </td>
                   <td style="padding:4px;text-align:right;color:#b45309;font-weight:600">{{ r.total_gap }}</td>
-                  <td style="padding:4px;text-align:right" :style="{color: r.result==='holding' ? '#94a3b8' : (r.pnl >= 0 ? '#0f9f45' : '#ef4444')}">{{ r.result==='holding' ? '—' : ((r.pnl > 0 ? '+' : '') + r.pnl) }}</td>
+                  <td style="padding:4px;text-align:right" :style="{color: (r.result==='holding' || r.result==='halt') ? '#94a3b8' : (r.pnl >= 0 ? '#0f9f45' : '#ef4444')}">{{ (r.result==='holding' || r.result==='halt') ? '—' : ((r.pnl > 0 ? '+' : '') + r.pnl) }}</td>
                   <td style="padding:4px;text-align:right;color:#64748b">{{ r.cum_pnl }}</td>
                 </tr>
               </tbody>
@@ -2959,7 +2959,7 @@ const multiStopSignals = computed(() => {
 const mtLoading = ref(false)
 const schemeDialog = ref({ visible: false, type: '' })  // 方案明细弹框 type: cold1/multi8
 const schemeData = ref(null)         // 方案明细数据
-const schemeStart = ref('2025-01-01')  // 方案日期段起（默认 2025-01-01）
+const schemeStart = ref('2020-01-01')  // 方案日期段起（默认 2020-01-01，数据最早 2020-03）
 const schemeEnd = ref('')            // 方案日期段止
 const schemeLoading = ref(false)
 const schemePage = ref(1)            // 当前页
@@ -3308,7 +3308,7 @@ async function loadMultiTrack() {
 }
 async function openScheme(type) {
   schemeDialog.value = { visible: true, type }
-  schemeStart.value = '2025-01-01'
+  schemeStart.value = '2020-01-01'
   schemeEnd.value = ''
   schemePage.value = 1
   if (type === 'cold1') loadHoldLive()
