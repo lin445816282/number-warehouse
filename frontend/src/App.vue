@@ -2075,6 +2075,18 @@
           <b>🎯 当天号码：</b><span style="font-weight:800;font-size:14px">{{ schemeData.current.nums.map(n => pad2(n)).join('.') }}</span>
           <span style="color:#64748b;margin-left:6px">（遗漏 {{ schemeData.current.gaps.join('/') }} 期）</span>
         </div>
+        <!-- 进行中跟踪（multi8） -->
+        <div v-if="schemeDialog.type === 'multi8' && schemeData && schemeData.in_progress" style="padding:10px 12px;background:#fefce8;border:1px solid #fde68a;border-radius:8px;margin-bottom:10px;font-size:12px;color:#713f12">
+          <template v-if="schemeData.in_progress.state === 'waiting'">
+            <div style="font-weight:700;margin-bottom:2px">🟡 止损后等待开号：{{ schemeData.in_progress.nums.map(n => pad2(n)).join('.') }}</div>
+            <div style="color:#b45309;font-weight:700">📅 已等待 {{ schemeData.in_progress.held }} 期<span v-if="schemeData.in_progress.enter_date">（{{ schemeData.in_progress.enter_date }} 止损进场等待）</span></div>
+          </template>
+          <template v-else>
+            <div style="font-weight:700;margin-bottom:2px">🔴 正在跟踪 {{ schemeData.in_progress.nums.map(n => pad2(n)).join('.') }}</div>
+            <div style="color:#b45309;font-weight:700">📅 已跟 {{ schemeData.in_progress.held }} 期<span v-if="schemeData.in_progress.enter_date">（{{ schemeData.in_progress.enter_date }} 进场）</span></div>
+            <div style="color:#92400e">距止损还剩 {{ schemeData.in_progress.remaining }} 期（跟踪 {{ schemeData.in_progress.held }}/6 期）</div>
+          </template>
+        </div>
 
         <!-- 日期段查询 -->
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
@@ -2139,12 +2151,12 @@
                     <template v-if="schemeDialog.type === 'cold1'">{{ pad2(r.num) }}</template>
                     <template v-else>{{ r.num_list.map(n => pad2(n)).join('.') }}</template>
                   </td>
-                  <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : r.result==='holding' ? '#1e40af' : r.result==='halt' ? '#f59e0b' : '#ef4444'}">
+                  <td style="padding:4px;white-space:nowrap" :style="{color: r.result==='hit' ? '#0f9f45' : r.result==='holding' ? '#1e40af' : r.result==='waiting' ? '#f59e0b' : r.result==='halt' ? '#f59e0b' : '#ef4444'}">
                     <template v-if="schemeDialog.type === 'cold1'">{{ r.result==='hit' ? '第'+r.held+'期中' : r.result==='holding' ? '进行中·第'+r.held+'期' : r.result==='halt' ? '熔断等待' : '止损' }}</template>
-                    <template v-else>{{ r.result==='hit' ? '第'+r.held+'期中'+pad2(r.hit_num) : '止损' }}</template>
+                    <template v-else>{{ r.result==='hit' ? '第'+r.held+'期中'+pad2(r.hit_num) : r.result==='holding' ? '进行中·第'+r.held+'期' : r.result==='waiting' ? '止损后等待·第'+r.held+'期' : '止损' }}</template>
                   </td>
                   <td style="padding:4px;text-align:right;color:#b45309;font-weight:600">{{ r.total_gap }}</td>
-                  <td style="padding:4px;text-align:right" :style="{color: (r.result==='holding' || r.result==='halt') ? '#94a3b8' : (r.pnl >= 0 ? '#0f9f45' : '#ef4444')}">{{ (r.result==='holding' || r.result==='halt') ? '—' : ((r.pnl > 0 ? '+' : '') + r.pnl) }}</td>
+                  <td style="padding:4px;text-align:right" :style="{color: (r.result==='holding' || r.result==='waiting' || r.result==='halt') ? '#94a3b8' : (r.pnl >= 0 ? '#0f9f45' : '#ef4444')}">{{ (r.result==='holding' || r.result==='waiting' || r.result==='halt') ? '—' : ((r.pnl > 0 ? '+' : '') + r.pnl) }}</td>
                   <td style="padding:4px;text-align:right;color:#64748b">{{ r.cum_pnl }}</td>
                 </tr>
               </tbody>

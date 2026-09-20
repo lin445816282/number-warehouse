@@ -6017,8 +6017,46 @@ def multi_track_8_detail(start_date: str = None, end_date: str = None, N: int = 
         _last_seen[draws[_t]] = _t
     _gap = {n: (_M - 1 - _last_seen[n]) if _last_seen[n] >= 0 else _M - 1 for n in range(1, 50)}
     current = sorted(range(1, 50), key=lambda x: _gap[x], reverse=True)[:N]
+    # 进行中轮次：重新跑引擎（include_holding），把 result in ("holding","waiting") 的当前轮追加进列表
+    in_progress = None
+    _active_round = None
+    for _hr in tracking_hold_multi(draws, N=N, K=K, include_holding=True):
+        if _hr.get("result") in ("holding", "waiting"):
+            _active_round = _hr
+            break
+    if _active_round:
+        _enter_d = dates[_active_round["enter_idx"]] if _active_round["enter_idx"] is not None and 0 <= _active_round["enter_idx"] < len(dates) else None
+        _is_waiting = _active_round["result"] == "waiting"
+        in_progress = {
+            "state": _active_round["result"],   # holding / waiting
+            "nums": _active_round["num_list"],
+            "gaps": _active_round["gaps"],
+            "held": _active_round["held"],
+            "enter_date": _enter_d,
+            "remaining": (K - _active_round["held"]) if not _is_waiting else None,
+        }
+        # 日期段过滤后仍追加（enter_date 在范围内才显示）
+        _ok = True
+        if start_date and _enter_d and _enter_d < start_date:
+            _ok = False
+        if end_date and _enter_d and _enter_d > end_date:
+            _ok = False
+        if _ok:
+            _last_cum = rounds[-1]["cum_pnl"] if rounds else 0
+            rounds.append({
+                "enter_date": _enter_d,
+                "end_date": None,
+                "num_list": _active_round["num_list"],
+                "gaps": _active_round["gaps"],
+                "held": _active_round["held"],
+                "hit_num": None,
+                "result": _active_round["result"],
+                "pnl": 0,
+                "cum_pnl": _last_cum,
+            })
     return {
         "rounds": rounds,
+        "in_progress": in_progress,
         "summary": {
             "total": len(rounds),
             "hits": hits,

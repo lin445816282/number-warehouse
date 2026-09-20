@@ -795,11 +795,14 @@ def tracking_hold_metrics(rounds, K):
     }
 
 
-def tracking_hold_multi(draws, N=8, K=6, warmup=100):
+def tracking_hold_multi(draws, N=8, K=6, warmup=100, include_holding=False):
     """前 N 最冷号 + K 期周期：锁定最冷 N 号跟踪 K 期，命中/止损后空仓等号开出再买。
 
     返回 rounds: [{num_list, gaps, held, result, pnl, hit_num, enter_idx, end_idx}]
     一轮盈亏：命中(第d期)=47-N*d；止损(K期没中)=-N*K
+    include_holding=True 时，把「正在跟踪、尚未完结」的当前轮追加进 rounds：
+      - result="holding"（BUY 跟踪中，held=已跟期数）
+      - result="waiting"（止损后 WAIT 等待中，held=已等待期数）
     """
     M = len(draws)
     last_seen = {n: -1 for n in range(1, 50)}
@@ -810,6 +813,8 @@ def tracking_hold_multi(draws, N=8, K=6, warmup=100):
     held = 0
     enter_idx = None
     wait_set = set()
+    wait_held = 0
+    wait_enter_idx = None
     rounds = []
     for t in range(warmup, M):
         gap = {n: (t - last_seen[n]) if last_seen[n] >= 0 else t for n in range(1, 50)}
@@ -820,6 +825,10 @@ def tracking_hold_multi(draws, N=8, K=6, warmup=100):
                 tracking = []
                 held = 0
                 enter_idx = None
+                wait_held = 0
+                wait_enter_idx = None
+            else:
+                wait_held += 1
         else:
             if not tracking:
                 tracking = sorted(range(1, 50), key=lambda x: gap[x], reverse=True)[:N]
@@ -842,11 +851,32 @@ def tracking_hold_multi(draws, N=8, K=6, warmup=100):
                     "pnl": -N * K, "enter_idx": enter_idx, "end_idx": t,
                 })
                 wait_set = set(tracking)
+                wait_enter_idx = t
+                wait_held = 0
                 tracking = []
                 held = 0
                 enter_idx = None
                 state = "WAIT"
         last_seen[draws[t]] = t
+    # 进行中：循环结束仍在跟踪（tracking 非空，held < K，未命中）
+    if include_holding and tracking and held > 0:
+        rounds.append({
+            "num_list": tracking[:], "gaps": [gap[x] for x in tracking],
+            "held": held, "hit_num": None, "result": "holding",
+            "pnl": 0, "enter_idx": enter_idx, "end_idx": None,
+        })
+    # 进行中：循环结束仍在等待（止损后 WAIT，等号开出）
+    elif include_holding and state == "WAIT" and wait_enter_idx is not None:
+        _wait_nums = sorted(wait_set)
+        _last_seen = {n: -1 for n in range(1, 50)}
+        for _t in range(M):
+            _last_seen[draws[_t]] = _t
+        _gap = {n: (M - 1 - _last_seen[n]) if _last_seen[n] >= 0 else M - 1 for n in range(1, 50)}
+        rounds.append({
+            "num_list": _wait_nums, "gaps": [_gap[x] for x in _wait_nums],
+            "held": wait_held, "hit_num": None, "result": "waiting",
+            "pnl": 0, "enter_idx": wait_enter_idx, "end_idx": None,
+        })
     return rounds
 
 
