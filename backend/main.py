@@ -410,6 +410,19 @@ def init_db():
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_lt_orders ON live_trade_orders(account_id, trade_date)")
+
+    # ── 最长号码每日记录台账 ──
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS longest_daily_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_date TEXT NOT NULL UNIQUE,
+            numbers TEXT NOT NULL,
+            top_n INTEGER NOT NULL DEFAULT 25,
+            draw_number INTEGER,
+            hit INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        )
+    """)
     db.commit()
     db.close()
 
@@ -5155,6 +5168,67 @@ def get_missing_numbers(date: str = None):
         "latest_date": latest_date,
         "total_records": total_records
     }
+
+# ═══════════════ 最长号码每日记录台账 ═══════════════
+@app.get("/api/longest-log")
+def get_longest_log():
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT * FROM longest_daily_log ORDER BY record_date DESC").fetchall()
+    db.close()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.post("/api/longest-log")
+def add_longest_log(date: str = None, top_n: int = 25):
+    """记录指定日期（默认最新）的最长号码快照。幂等：同日期覆盖。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    if date:
+        rows = db.execute(
+            "SELECT date, draw_number FROM records WHERE date <= ? ORDER BY date DESC", (date,)
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT date, draw_number FROM records ORDER BY date DESC").fetchall()
+    if not rows:
+        db.close()
+        return {"error": "无记录"}
+    latest_date = rows[0]["date"]
+    total_records = len(rows)
+    # 计算每个号码 current_gap（距最新记录的期数）
+    num_indices = {i: [] for i in range(1, 50)}
+    for idx, r in enumerate(rows):
+        n = r["draw_number"]
+        if 1 <= n <= 49:
+            num_indices[n].append(idx)
+    gaps = []
+    for n in range(1, 50):
+        indices = num_indices[n]
+        current_gap = indices[0] if indices else total_records
+        gaps.append((n, current_gap))
+    gaps.sort(key=lambda x: x[1], reverse=True)
+    top_nums = [n for n, _ in gaps[:top_n]]
+    draw_number = rows[0]["draw_number"]
+    hit = 1 if draw_number and draw_number in top_nums else 0
+    db.execute(
+        "INSERT INTO longest_daily_log (record_date, numbers, top_n, draw_number, hit) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(record_date) DO UPDATE SET "
+        "numbers=excluded.numbers, top_n=excluded.top_n, draw_number=excluded.draw_number, hit=excluded.hit",
+        (latest_date, json.dumps(top_nums), top_n, draw_number, hit)
+    )
+    db.commit()
+    db.close()
+    return {"ok": True, "record_date": latest_date, "numbers": top_nums,
+            "draw_number": draw_number, "hit": hit}
+
+
+@app.delete("/api/longest-log/{log_id}")
+def del_longest_log(log_id: int):
+    db = get_db()
+    db.execute("DELETE FROM longest_daily_log WHERE id=?", (log_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
 
 # ═══════════════ 尾数走势分析 ═══════════════
 @app.get("/api/tail-analysis")

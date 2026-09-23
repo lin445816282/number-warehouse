@@ -258,6 +258,31 @@
                 {{ missingSortedCode }}
               </div>
             </div>
+
+            <!-- 每日记录台账 -->
+            <div style="margin-top:12px;padding-top:10px;border-top:2px solid #334155">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span style="font-size:12px;color:#64748b">📝 每日记录台账</span>
+                <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="addLongestLog">📝 记录当天</button>
+              </div>
+              <div v-if="longestLog.length" style="max-height:340px;overflow-y:auto">
+                <div v-for="log in longestLog" :key="log.id"
+                     style="border:1px solid #1e293b;border-radius:8px;padding:8px;margin-bottom:8px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                    <span style="font-size:12px;font-weight:700;color:#e2e8f0">{{ log.record_date }}</span>
+                    <span style="display:flex;align-items:center;gap:6px">
+                      <span v-if="log.draw_number" style="font-size:12px;color:#94a3b8">开 {{ pad2(log.draw_number) }}</span>
+                      <span :style="log.hit ? 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#dcfce7;color:#15803d' : 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#fee2e2;color:#b91c1c'">{{ log.hit ? '✅ 命中' : '❌ 未中' }}</span>
+                      <button style="font-size:12px;color:#64748b;background:none;border:none;cursor:pointer;padding:0 2px" @click="delLongestLog(log.id)">🗑</button>
+                    </span>
+                  </div>
+                  <div style="font-size:11px;color:#94a3b8;word-break:break-all;line-height:1.7;font-family:ui-monospace,monospace">
+                    {{ (log.numbers || []).map(n => pad2(n)).join('.') }}
+                  </div>
+                </div>
+              </div>
+              <div v-else style="font-size:12px;color:#64748b;text-align:center;padding:10px">暂无记录，点「📝 记录当天」保存当日最长号码</div>
+            </div>
           </div>
           <div class="form-btns" style="margin-top:12px">
             <button class="btn-cancel" @click="showMissing=false">关闭</button>
@@ -2837,6 +2862,7 @@ async function openMissingNumbers() {
   showMissing.value = true
   missingDate.value = ''
   await fetchMissing()
+  loadLongestLog()
 }
 
 const missingSortedCode = computed(() => {
@@ -2861,6 +2887,44 @@ function copyMissingSorted() {
   }).catch(() => {
     prompt('复制以下号码:', code)
   })
+}
+
+// ===== 最长号码每日记录台账 =====
+const longestLog = ref([])
+
+async function loadLongestLog() {
+  try {
+    const res = await apiFetch('/longest-log')
+    const data = await res.json()
+    longestLog.value = (data.items || []).map(it => ({
+      ...it,
+      numbers: typeof it.numbers === 'string' ? JSON.parse(it.numbers) : it.numbers
+    }))
+  } catch (e) {}
+}
+
+async function addLongestLog() {
+  try {
+    const res = await apiFetch('/longest-log', { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) {
+      const nums = (data.numbers || []).map(n => pad2(n)).join('.')
+      $notify(`已记录 ${data.record_date}：${data.hit ? '命中' : '未中'}（${data.draw_number}）`)
+      await loadLongestLog()
+    } else {
+      $notify(data.error || '记录失败', true)
+    }
+  } catch (e) {
+    $notify('记录失败: ' + e.message, true)
+  }
+}
+
+async function delLongestLog(id) {
+  if (!await $confirm('删除这条记录？')) return
+  try {
+    await apiFetch(`/longest-log/${id}`, { method: 'DELETE' })
+    await loadLongestLog()
+  } catch (e) {}
 }
 
 // ===== 最长跟踪演算 =====
