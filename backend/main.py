@@ -6072,6 +6072,37 @@ def multi_track_8_detail(start_date: str = None, end_date: str = None, N: int = 
     }
 
 
+@app.get("/api/front/coldest8")
+def front_coldest8(N: int = 8, K: int = 6):
+    """公开接口（无需登录）：前 N 最冷号当天号码 + 遗漏期数 + 跟踪持有状态。供 number-counter.html 跨站抽取。"""
+    dates, draws = load_records()
+    if not draws:
+        raise HTTPException(400, "无记录")
+    _M = len(draws)
+    _last_seen = {n: -1 for n in range(1, 50)}
+    for _t in range(_M):
+        _last_seen[draws[_t]] = _t
+    _gap = {n: (_M - 1 - _last_seen[n]) if _last_seen[n] >= 0 else _M - 1 for n in range(1, 50)}
+    current = sorted(range(1, 50), key=lambda x: _gap[x], reverse=True)[:N]
+    state = None
+    for _hr in tracking_hold_multi(draws, N=N, K=K, include_holding=True):
+        if _hr.get("result") in ("holding", "waiting"):
+            state = {
+                "state": _hr["result"],
+                "held": _hr["held"],
+                "remaining": (K - _hr["held"]) if _hr["result"] == "holding" else None,
+            }
+            break
+    return {
+        "ok": True,
+        "latest_date": dates[-1] if dates else None,
+        "nums": current,
+        "gaps": [_gap[x] for x in current],
+        "state": state,
+        "params": {"N": N, "K": K},
+    }
+
+
 # ══════════════════════════════════════════════════════════════════
 # 实盘下单执行 API（真实资金跟踪）
 # ══════════════════════════════════════════════════════════════════

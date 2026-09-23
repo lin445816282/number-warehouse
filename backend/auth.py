@@ -36,6 +36,7 @@ _WHITELIST = {
     "/api/export/save-daily", "/api/export/sync-store", "/api/export/push-warning", "/api/export/push-warning-range",
     "/api/export/collection-info", "/api/export/latest-snapshot-date",
     "/api/export/sync-cron", "/api/export/record-ranks",
+    "/api/front/coldest8",
 }
 
 # ===== 工具函数 =====
