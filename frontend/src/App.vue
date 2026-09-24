@@ -263,25 +263,74 @@
             <div style="margin-top:12px;padding-top:10px;border-top:2px solid #334155">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <span style="font-size:12px;color:#64748b">📝 每日记录台账</span>
-                <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="addLongestLog">📝 记录当天</button>
+                <span style="display:flex;gap:6px">
+                  <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="backfillLongestLog">⏪ 回填历史</button>
+                  <button class="btn-add" style="font-size:12px;padding:4px 10px" @click="addLongestLog">📝 记录当天</button>
+                </span>
               </div>
-              <div v-if="longestLog.length" style="max-height:340px;overflow-y:auto">
-                <div v-for="log in longestLog" :key="log.id"
-                     style="border:1px solid #1e293b;border-radius:8px;padding:8px;margin-bottom:8px">
-                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-                    <span style="font-size:12px;font-weight:700;color:#e2e8f0">{{ log.record_date }}</span>
-                    <span style="display:flex;align-items:center;gap:6px">
-                      <span v-if="log.draw_number" style="font-size:12px;color:#94a3b8">开 {{ pad2(log.draw_number) }}</span>
-                      <span :style="log.hit ? 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#dcfce7;color:#15803d' : 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#fee2e2;color:#b91c1c'">{{ log.hit ? '✅ 命中' : '❌ 未中' }}</span>
-                      <button style="font-size:12px;color:#64748b;background:none;border:none;cursor:pointer;padding:0 2px" @click="delLongestLog(log.id)">🗑</button>
+
+              <!-- 统计区块 -->
+              <div v-if="longestStats && longestStats.total" style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px;margin-bottom:10px">
+                <div style="font-size:11px;font-weight:700;color:#94a3b8;margin-bottom:8px">📊 统计（共 {{ longestStats.total }} 期）</div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">
+                  <div style="text-align:center;padding:6px;background:#1e293b;border-radius:6px">
+                    <div style="font-size:16px;font-weight:700" :style="{color: longestStats.hit_rate >= 50 ? '#4ade80' : '#f87171'}">{{ longestStats.hit_rate }}%</div>
+                    <div style="font-size:10px;color:#64748b">命中率</div>
+                  </div>
+                  <div style="text-align:center;padding:6px;background:#1e293b;border-radius:6px">
+                    <div style="font-size:16px;font-weight:700;color:#4ade80">{{ longestStats.hit_count }}</div>
+                    <div style="font-size:10px;color:#64748b">命中</div>
+                  </div>
+                  <div style="text-align:center;padding:6px;background:#1e293b;border-radius:6px">
+                    <div style="font-size:16px;font-weight:700;color:#f87171">{{ longestStats.miss_count }}</div>
+                    <div style="font-size:10px;color:#64748b">未中</div>
+                  </div>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:10px;color:#94a3b8">
+                  <div>连中 <b style="color:#4ade80">{{ longestStats.max_hit_streak }}</b></div>
+                  <div>连不中 <b style="color:#f87171">{{ longestStats.max_miss_streak }}</b></div>
+                  <div>近7天 <b :style="{color:(longestStats.recent7_hit_rate ?? 0)>=50?'#4ade80':'#f87171'}">{{ longestStats.recent7_hit_rate ?? '-' }}%</b></div>
+                  <div>近30天 <b :style="{color:(longestStats.recent30_hit_rate ?? 0)>=50?'#4ade80':'#f87171'}">{{ longestStats.recent30_hit_rate ?? '-' }}%</b></div>
+                </div>
+                <div v-if="longestStats.cur_miss_streak > 0" style="font-size:10px;color:#fbbf24;margin-top:6px">⚠️ 当前已连续 {{ longestStats.cur_miss_streak }} 期未中</div>
+                <div v-if="longestStats.cur_hit_streak > 0" style="font-size:10px;color:#4ade80;margin-top:6px">🔥 当前已连续 {{ longestStats.cur_hit_streak }} 期命中</div>
+                <!-- 号码冷热频次 -->
+                <details style="margin-top:8px">
+                  <summary style="font-size:11px;color:#94a3b8;cursor:pointer;font-weight:600">🔢 号码出现频次（冷号榜）</summary>
+                  <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">
+                    <span v-for="f in longestStats.num_freq.slice(0, 25)" :key="f.num"
+                          style="font-size:10px;padding:2px 6px;border-radius:5px;background:#1e293b;color:#e2e8f0"
+                          :title="'出现 ' + f.appear + ' 期 · 命中 ' + f.hit + ' 次'">
+                      {{ pad2(f.num) }}<span style="color:#64748b">×{{ f.appear }}</span>
                     </span>
                   </div>
-                  <div style="font-size:11px;color:#94a3b8;word-break:break-all;line-height:1.7;font-family:ui-monospace,monospace">
+                  <div style="font-size:9px;color:#475569;margin-top:4px">数字=该号出现在 top25 冷号榜的期数</div>
+                </details>
+              </div>
+
+              <!-- 记录列表（可点击展开） -->
+              <div v-if="longestLog.length" style="max-height:400px;overflow-y:auto">
+                <div v-for="log in longestLog" :key="log.id"
+                     style="border:1px solid #1e293b;border-radius:8px;padding:8px;margin-bottom:8px;cursor:pointer"
+                     @click="toggleLog(log.id)">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="display:flex;align-items:center;gap:6px">
+                      <span style="font-size:12px;font-weight:700;color:#e2e8f0">{{ log.record_date }}</span>
+                      <span v-if="log.draw_number" style="font-size:12px;color:#94a3b8">开 {{ pad2(log.draw_number) }}</span>
+                      <span :style="log.hit ? 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#dcfce7;color:#15803d' : 'font-size:11px;padding:1px 8px;border-radius:6px;font-weight:700;background:#fee2e2;color:#b91c1c'">{{ log.hit ? '✅ 命中' : '❌ 未中' }}</span>
+                    </span>
+                    <span style="display:flex;align-items:center;gap:6px">
+                      <span style="font-size:10px;color:#475569">{{ (log.numbers || []).length }}个号</span>
+                      <span style="font-size:12px;color:#64748b;transform:rotate(0deg);transition:transform .2s" :style="expandedLogId === log.id ? 'transform:rotate(90deg)' : ''">▶</span>
+                      <button style="font-size:12px;color:#64748b;background:none;border:none;cursor:pointer;padding:0 2px" @click.stop="delLongestLog(log.id)">🗑</button>
+                    </span>
+                  </div>
+                  <div v-if="expandedLogId === log.id" style="font-size:11px;color:#94a3b8;word-break:break-all;line-height:1.9;font-family:ui-monospace,monospace;margin-top:6px;padding-top:6px;border-top:1px dashed #1e293b">
                     {{ (log.numbers || []).map(n => pad2(n)).join('.') }}
                   </div>
                 </div>
               </div>
-              <div v-else style="font-size:12px;color:#64748b;text-align:center;padding:10px">暂无记录，点「📝 记录当天」保存当日最长号码</div>
+              <div v-else style="font-size:12px;color:#64748b;text-align:center;padding:10px">暂无记录，点「⏪ 回填历史」补齐全部历史，或「📝 记录当天」保存当日最长号码</div>
             </div>
           </div>
           <div class="form-btns" style="margin-top:12px">
@@ -2891,6 +2940,8 @@ function copyMissingSorted() {
 
 // ===== 最长号码每日记录台账 =====
 const longestLog = ref([])
+const longestStats = ref(null)
+const expandedLogId = ref(null)
 
 async function loadLongestLog() {
   try {
@@ -2900,7 +2951,29 @@ async function loadLongestLog() {
       ...it,
       numbers: typeof it.numbers === 'string' ? JSON.parse(it.numbers) : it.numbers
     }))
+    longestStats.value = data.stats || null
   } catch (e) {}
+}
+
+function toggleLog(id) {
+  expandedLogId.value = expandedLogId.value === id ? null : id
+}
+
+async function backfillLongestLog() {
+  if (!await $confirm('回填全部历史记录？将对 records 每一期计算当日 top25 冷号快照（幂等覆盖，约2381期，秒级完成）')) return
+  try {
+    $notify('⏳ 回填历史中...')
+    const res = await apiFetch('/longest-log/backfill', { method: 'POST' })
+    const data = await res.json()
+    if (data.ok) {
+      $notify(`✅ 已回填 ${data.backfilled} 期，命中率 ${data.stats.hit_rate}%`)
+      await loadLongestLog()
+    } else {
+      $notify(data.error || '回填失败', true)
+    }
+  } catch (e) {
+    $notify('回填失败: ' + e.message, true)
+  }
 }
 
 async function addLongestLog() {

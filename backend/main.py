@@ -5170,13 +5170,138 @@ def get_missing_numbers(date: str = None):
     }
 
 # ═══════════════ 最长号码每日记录台账 ═══════════════
+def _compute_longest_log_stats(db):
+    """台账各维度统计：命中率、连中/连不中、号码冷热频次、近N天命中率"""
+    db.row_factory = sqlite3.Row
+    rows = db.execute(
+        "SELECT * FROM longest_daily_log ORDER BY record_date ASC"
+    ).fetchall()
+    total = len(rows)
+    if total == 0:
+        return {"total": 0, "hit_count": 0, "miss_count": 0, "hit_rate": 0,
+                "max_hit_streak": 0, "max_miss_streak": 0,
+                "cur_hit_streak": 0, "cur_miss_streak": 0,
+                "recent7_hit_rate": None, "recent30_hit_rate": None, "num_freq": []}
+
+    hit_count = 0
+    max_hit_streak = 0
+    max_miss_streak = 0
+    cur_hit_streak = 0
+    cur_miss_streak = 0
+    num_freq = {}  # num -> {"appear": N, "hit": M}
+
+    for r in rows:
+        hit = 1 if r["hit"] else 0
+        draw = r["draw_number"]
+        if hit:
+            hit_count += 1
+        # 连续命中/未中
+        if hit:
+            cur_hit_streak += 1
+            cur_miss_streak = 0
+        else:
+            cur_miss_streak += 1
+            cur_hit_streak = 0
+        max_hit_streak = max(max_hit_streak, cur_hit_streak)
+        max_miss_streak = max(max_miss_streak, cur_miss_streak)
+        # 号码频次
+        try:
+            nums = json.loads(r["numbers"]) if isinstance(r["numbers"], str) else r["numbers"]
+        except Exception:
+            nums = []
+        for n in nums:
+            d = num_freq.setdefault(n, {"appear": 0, "hit": 0})
+            d["appear"] += 1
+            if draw == n:
+                d["hit"] += 1
+
+    # 末尾连续状态（从最后一条往前）
+    tail_hit = 0
+    tail_miss = 0
+    for r in reversed(rows):
+        if r["hit"]:
+            if tail_miss == 0:
+                tail_hit += 1
+            else:
+                break
+        else:
+            if tail_hit == 0:
+                tail_miss += 1
+            else:
+                break
+
+    def recent_rate(n):
+        if total < n:
+            return None
+        recent = rows[-n:]
+        return round(sum(1 for r in recent if r["hit"]) / n * 100, 1)
+
+    num_freq_list = sorted(
+        [{"num": n, "appear": v["appear"], "hit": v["hit"]} for n, v in num_freq.items()],
+        key=lambda x: -x["appear"]
+    )
+
+    return {
+        "total": total,
+        "hit_count": hit_count,
+        "miss_count": total - hit_count,
+        "hit_rate": round(hit_count / total * 100, 1),
+        "max_hit_streak": max_hit_streak,
+        "max_miss_streak": max_miss_streak,
+        "cur_hit_streak": tail_hit,
+        "cur_miss_streak": tail_miss,
+        "recent7_hit_rate": recent_rate(7),
+        "recent30_hit_rate": recent_rate(30),
+        "num_freq": num_freq_list,
+    }
+
+
 @app.get("/api/longest-log")
 def get_longest_log():
     db = get_db()
     db.row_factory = sqlite3.Row
     rows = db.execute("SELECT * FROM longest_daily_log ORDER BY record_date DESC").fetchall()
+    stats = _compute_longest_log_stats(db)
     db.close()
-    return {"items": [dict(r) for r in rows]}
+    return {"items": [dict(r) for r in rows], "stats": stats}
+
+
+@app.post("/api/longest-log/backfill")
+def backfill_longest_log(top_n: int = 25):
+    """历史全量回填：对 records 每一天计算当日 top25 冷号快照并写入台账（幂等覆盖）。
+    流式算法 O(N×49log49)，2381 期秒级完成。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT date, draw_number FROM records ORDER BY date ASC").fetchall()
+    if not rows:
+        db.close()
+        return {"error": "无记录"}
+    last_seen = {}  # num -> 升序位置 idx（0-based）
+    written = 0
+    for i, r in enumerate(rows):
+        date = r["date"]
+        draw = r["draw_number"]
+        # 计算每个号码 gap（距第 i 天的期数，等价于原降序 idx 口径）
+        gaps = []
+        for n in range(1, 50):
+            gap = (i - last_seen[n]) if n in last_seen else (i + 1)
+            gaps.append((n, gap))
+        gaps.sort(key=lambda x: -x[1])
+        top_nums = [n for n, _ in gaps[:top_n]]
+        hit = 1 if draw and draw in top_nums else 0
+        db.execute(
+            "INSERT INTO longest_daily_log (record_date, numbers, top_n, draw_number, hit) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(record_date) DO UPDATE SET "
+            "numbers=excluded.numbers, top_n=excluded.top_n, draw_number=excluded.draw_number, hit=excluded.hit",
+            (date, json.dumps(top_nums), top_n, draw, hit)
+        )
+        if draw and 1 <= draw <= 49:
+            last_seen[draw] = i
+        written += 1
+    db.commit()
+    stats = _compute_longest_log_stats(db)
+    db.close()
+    return {"ok": True, "backfilled": written, "stats": stats}
 
 
 @app.post("/api/longest-log")
