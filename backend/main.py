@@ -17,6 +17,7 @@ from tracking_engine import (
     tracking_hold_current, tracking_hold_trail, tracking_hold_rounds,
     tracking_hold_metrics, tracking_hold_multi,
     live_trade_scheme_params, live_trade_advance,
+    run_follow_lists,
 )
 
 app = FastAPI(title="数字仓库轮换系统")
@@ -5266,6 +5267,53 @@ def get_longest_log():
     return {"items": [dict(r) for r in rows], "stats": stats}
 
 
+# ═══════════════ 跟号列表（最长号码弹窗扩展）═══════════════
+@app.get("/api/follow-lists")
+def get_follow_lists(
+    stop_miss: int = 2,
+    bet_per_num: int = 1,
+    hot_count: int = 24,
+    year_month: str = None,
+):
+    """4 个跟号策略回测：跟最冷25号组 / 跟最热24号组 / 切换跟号 / 跟最新+最长。
+    错 stop_miss 次止损 + 命中后重跟，输出 ROI。支持 ?year_month=YYYY-MM 按年月过滤轮次。"""
+    dates, draws = load_records()
+    if not draws:
+        return {"lists": [], "latest_date": None, "total_records": 0}
+    stop_miss = max(1, min(stop_miss, 10))
+    bet_per_num = max(1, bet_per_num)
+    hot_count = max(1, min(hot_count, 48))
+    result = run_follow_lists(draws, dates, warmup=100, stop_miss=stop_miss,
+                              bet_per_num=bet_per_num, hot_count=hot_count)
+
+    # 年月过滤：只保留该月的轮次（命中/止损按结束日期归月），汇总用过滤后的轮次重算
+    if year_month:
+        filtered_lists = []
+        for L in result["lists"]:
+            rounds = [r for r in L["rounds"] if (r["end_date"] or "").startswith(year_month)]
+            hits = sum(1 for r in rounds if r["result"] == "hit")
+            stops = sum(1 for r in rounds if r["result"] == "stop")
+            total_pnl = round(sum(r["pnl"] for r in rounds), 2)
+            total_invest = round(sum(r["held"] * len(r["nums"]) * bet_per_num for r in rounds), 2)
+            n_rounds = len(rounds)
+            hit_rate = (hits / n_rounds * 100) if n_rounds else 0.0
+            roi = (total_pnl / total_invest * 100) if total_invest else 0.0
+            filtered_lists.append({
+                "key": L["key"], "name": L["name"], "desc": L["desc"],
+                "summary": {
+                    "rounds": n_rounds, "hits": hits, "stops": stops,
+                    "hit_rate": round(hit_rate, 2),
+                    "total_pnl": total_pnl, "total_invest": total_invest,
+                    "roi": round(roi, 2),
+                },
+                "rounds": rounds,
+                "current": L["current"],
+            })
+        result["lists"] = filtered_lists
+        result["year_month"] = year_month
+    return result
+
+
 @app.post("/api/longest-log/backfill")
 def backfill_longest_log(top_n: int = 25):
     """历史全量回填：对 records 每一天计算当日 top25 冷号快照并写入台账（幂等覆盖）。
@@ -5970,6 +6018,10 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
     total = len(rounds)
     hits = sum(1 for r in rounds if r["result"] == "hit")
     total_pnl = sum(r["pnl"] for r in rounds)
+    # ROI = 总盈亏 / 总投入（只算已完结轮 hit/stop；halt 熔断不投入、holding 进行中不结算）
+    _settled = [r for r in rounds if r["result"] in ("hit", "stop")]
+    total_invest = sum(r["held"] for r in _settled)
+    roi = (total_pnl / total_invest * 100) if total_invest else 0.0
     recent = rounds[-30:] if len(rounds) > 30 else rounds
     recent_hits = sum(1 for r in recent if r["result"] == "hit")
     recent_pnl = sum(r["pnl"] for r in recent)
@@ -6058,6 +6110,8 @@ def tracking_hold_rounds_api(theta: float = 10, K: int = 12, signal: str = "gap"
             "hit_rate": round(full_rate, 2),
             "total_pnl": total_pnl,
             "avg_pnl": round(total_pnl / total, 3) if total else 0,
+            "total_invest": round(total_invest, 2),
+            "roi": round(roi, 2),
         },
         "recent": {
             "total": len(recent), "hits": recent_hits,
@@ -6175,6 +6229,10 @@ def multi_track_8_detail(start_date: str = None, end_date: str = None, N: int = 
         r["cum_pnl"] = _cum
     hits = sum(1 for r in rounds if r["result"] == "hit")
     total_pnl = sum(r["pnl"] for r in rounds)
+    # ROI = 总盈亏 / 总投入（只算已完结轮 hit/stop；进行中 holding/waiting 不结算不计投入）
+    _settled = [r for r in rounds if r["result"] in ("hit", "stop")]
+    total_invest = sum(N * r["held"] for r in _settled)
+    roi = (total_pnl / total_invest * 100) if total_invest else 0.0
 
     # 停手信号：health（近20轮 vs 全量）+ metrics（盈亏平衡门槛/最长连亏）
     full_hits = sum(1 for r in all_rounds if r["result"] == "hit")
@@ -6262,6 +6320,8 @@ def multi_track_8_detail(start_date: str = None, end_date: str = None, N: int = 
             "stops": len(rounds) - hits,
             "hit_rate": round(hits / len(rounds) * 100, 2) if rounds else 0,
             "total_pnl": total_pnl,
+            "total_invest": round(total_invest, 2),
+            "roi": round(roi, 2),
         },
         "params": {"N": N, "K": K},
         "date_range": {"start": start_date, "end": end_date},

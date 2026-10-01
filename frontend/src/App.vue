@@ -208,8 +208,8 @@
 
       <!-- 最长未出号码弹窗 -->
       <div v-if="showMissing" class="form-overlay" @click.self="showMissing=false">
-        <div class="form-card" style="max-width:420px;max-height:90vh;overflow-y:auto">
-          <div class="form-title">🔢 最长未出号码 TOP25</div>
+        <div class="form-card" style="max-width:720px;max-height:92vh;overflow-y:auto;background:#0f172a">
+          <div class="form-title" style="color:#e2e8f0">🔢 最长未出号码 TOP25</div>
           <div v-if="missingLoading" style="text-align:center;padding:20px">⏳ 分析中...</div>
           <div v-else-if="missingData.error" style="color:#dc2626;padding:16px">{{ missingData.error }}</div>
           <div v-else>
@@ -331,6 +331,82 @@
                 </div>
               </div>
               <div v-else style="font-size:12px;color:#64748b;text-align:center;padding:10px">暂无记录，点「⏪ 回填历史」补齐全部历史，或「📝 记录当天」保存当日最长号码</div>
+            </div>
+
+            <!-- 🎯 跟号列表（4 策略回测 + ROI） -->
+            <div style="margin-top:12px;padding-top:10px;border-top:2px solid #334155">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px">
+                <span style="font-size:12px;color:#64748b;font-weight:700">🎯 跟号列表（错{{ followStopMiss }}次止损·命中重跟）</span>
+                <span style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                  <input type="month" v-model="followYearMonth" class="form-input" style="width:auto;padding:4px 6px;font-size:11px" @change="loadFollowLists">
+                  <select v-model.number="followStopMiss" class="form-input" style="width:auto;padding:4px 6px;font-size:11px" @change="loadFollowLists">
+                    <option :value="1">错1次止损</option>
+                    <option :value="2">错2次止损</option>
+                    <option :value="3">错3次止损</option>
+                    <option :value="5">错5次止损</option>
+                  </select>
+                  <button class="btn-add" style="font-size:11px;padding:4px 8px" @click="loadFollowLists">🔄 重算</button>
+                </span>
+              </div>
+
+              <div v-if="followLoading" style="text-align:center;padding:14px;font-size:12px;color:#64748b">⏳ 回测中...</div>
+              <div v-else-if="!followLists.length" style="text-align:center;padding:14px;font-size:12px;color:#64748b">暂无跟号数据</div>
+
+              <!-- 4 个策略卡片 -->
+              <div v-for="L in followLists" :key="L.key"
+                   style="border:1px solid #1e293b;border-radius:10px;margin-bottom:8px;overflow:hidden;background:#0f172a">
+                <!-- 卡片头 -->
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;cursor:pointer"
+                     @click="toggleFollowList(L.key)">
+                  <span style="display:flex;align-items:center;gap:6px;min-width:0">
+                    <span style="font-size:13px;font-weight:700;color:#e2e8f0;white-space:nowrap">{{ L.name }}</span>
+                    <span :style="L.current.state === 'tracking' ? 'font-size:10px;padding:1px 8px;border-radius:6px;background:#fef3c7;color:#92400e;font-weight:700' : L.current.state === 'halt' ? 'font-size:10px;padding:1px 8px;border-radius:6px;background:#fee2e2;color:#b91c1c;font-weight:700' : 'font-size:10px;padding:1px 8px;border-radius:6px;background:#e2e8f0;color:#475569;font-weight:700'">
+                      {{ L.current.label }}<span v-if="L.current.nums.length"> 跟{{ L.current.nums.length }}号</span>
+                    </span>
+                  </span>
+                  <span style="font-size:11px;color:#64748b;transform:rotate(0deg);transition:transform .2s"
+                        :style="followExpanded[L.key] ? 'transform:rotate(90deg)' : ''">▶</span>
+                </div>
+
+                <!-- 指标条（始终显示） -->
+                <div style="display:flex;flex-wrap:wrap;gap:6px;padding:0 10px 8px;font-size:11px">
+                  <span style="color:#94a3b8">轮数 <b style="color:#e2e8f0">{{ L.summary.rounds }}</b></span>
+                  <span style="color:#94a3b8">命中 <b style="color:#4ade80">{{ L.summary.hits }}</b></span>
+                  <span style="color:#94a3b8">止损 <b style="color:#f87171">{{ L.summary.stops }}</b></span>
+                  <span style="color:#94a3b8">命中率 <b :style="{color: L.summary.hit_rate >= 50 ? '#4ade80' : '#f87171'}">{{ L.summary.hit_rate }}%</b></span>
+                  <span style="color:#94a3b8">盈亏 <b :style="{color: L.summary.total_pnl >= 0 ? '#4ade80' : '#f87171'}">{{ L.summary.total_pnl >= 0 ? '+' : '' }}{{ L.summary.total_pnl }}</b></span>
+                  <span style="color:#94a3b8">投入 <b style="color:#e2e8f0">{{ L.summary.total_invest }}</b></span>
+                  <span style="color:#94a3b8">ROI <b :style="{color: L.summary.roi >= 0 ? '#4ade80' : '#f87171'}">{{ L.summary.roi >= 0 ? '+' : '' }}{{ L.summary.roi }}%</b></span>
+                </div>
+
+                <!-- 展开详情 -->
+                <div v-if="followExpanded[L.key]" style="padding:0 10px 10px;border-top:1px dashed #1e293b">
+                  <div style="font-size:10px;color:#64748b;margin:6px 0 4px">{{ L.desc }}</div>
+                  <!-- 明细轮次（倒序） -->
+                  <button style="font-size:11px;color:#64748b;background:none;border:none;cursor:pointer;padding:0;margin:4px 0"
+                          @click="toggleFollowRounds(L.key)">
+                    {{ followRoundsExpanded[L.key] ? '📕 收起明细' : '📖 展开明细（' + L.rounds.length + ' 轮）' }}
+                  </button>
+                  <div v-if="followRoundsExpanded[L.key]" style="max-height:300px;overflow-y:auto;margin-top:4px">
+                    <div v-for="(r, ri) in [...L.rounds].reverse().slice(0, 200)" :key="ri"
+                         style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-bottom:1px solid #1e293b;font-size:11px">
+                      <span style="display:flex;gap:6px;align-items:center;min-width:0">
+                        <span style="color:#64748b">{{ r.end_date }}</span>
+                        <span style="color:#e2e8f0;font-weight:600">开 {{ pad2(r.draw) }}</span>
+                        <span style="color:#64748b">跟{{ r.nums.length }}号×{{ r.held }}期</span>
+                        <span :style="r.result === 'hit' ? 'color:#4ade80;font-weight:700' : 'color:#f87171;font-weight:700'">
+                          {{ r.result === 'hit' ? '✅ 中' : '❌ 止损' }}
+                        </span>
+                      </span>
+                      <span :style="{color: r.pnl >= 0 ? '#4ade80' : '#f87171', fontWeight: '700'}">{{ r.pnl >= 0 ? '+' : '' }}{{ r.pnl }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div style="font-size:9px;color:#94a3b8;margin-top:4px;line-height:1.6">
+                💡 每期下注整组号（最冷25号 / 最热24号），等额每号 {{ followBetPerNum }} 元、命中赔 47 倍。命中率 ≈ 25/49（最冷组）≈ 51% 单期，但 47 赔率 &lt; 49 号码，等额长期负期望——四个策略历史 ROI 均为负，勿作押注依据，仅作冷热组观察。
+              </div>
             </div>
           </div>
           <div class="form-btns" style="margin-top:12px">
@@ -2195,6 +2271,14 @@
               <div class="tracking-stat-value" :style="{color: schemeData.summary.total_pnl >= 0 ? '#0f9f45' : '#ef4444'}">{{ schemeData.summary.total_pnl }}</div>
               <div class="tracking-stat-label">总盈亏</div>
             </div>
+            <div class="tracking-stat" style="flex:1;min-width:80px">
+              <div class="tracking-stat-value" style="color:#1a2a4a">{{ schemeData.summary.total_invest }}</div>
+              <div class="tracking-stat-label">总投入</div>
+            </div>
+            <div class="tracking-stat" style="flex:1;min-width:80px">
+              <div class="tracking-stat-value" :style="{color: (schemeData.summary.roi ?? 0) >= 0 ? '#0f9f45' : '#ef4444'}">{{ (schemeData.summary.roi ?? 0) >= 0 ? '+' : '' }}{{ schemeData.summary.roi }}%</div>
+              <div class="tracking-stat-label">ROI</div>
+            </div>
           </div>
           <!-- 最长期数 Top10（cold1 才显示）-->
           <div v-if="schemeDialog.type === 'cold1' && schemeTopGap.length" style="margin-bottom:10px;padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px">
@@ -2912,6 +2996,7 @@ async function openMissingNumbers() {
   missingDate.value = ''
   await fetchMissing()
   loadLongestLog()
+  loadFollowLists()
 }
 
 const missingSortedCode = computed(() => {
@@ -2999,6 +3084,41 @@ async function delLongestLog(id) {
     await loadLongestLog()
   } catch (e) {}
 }
+
+// ===== 跟号列表（最长号码弹窗扩展）=====
+const followLists = ref([])
+const followLoading = ref(false)
+const followStopMiss = ref(2)      // 错几次止损
+const followBetPerNum = ref(1)     // 每号金额（元）
+const followHotCount = ref(24)     // 最热号组数量（最冷=49-最热）
+const followYearMonth = ref('')    // 年月过滤 YYYY-MM
+const followExpanded = ref({})     // 每个列表的展开状态 key -> bool
+const followRoundsExpanded = ref({})  // 明细轮次展开 key -> bool
+
+async function loadFollowLists() {
+  followLoading.value = true
+  try {
+    const p = new URLSearchParams()
+    p.set('stop_miss', followStopMiss.value)
+    p.set('bet_per_num', followBetPerNum.value)
+    p.set('hot_count', followHotCount.value)
+    if (followYearMonth.value) p.set('year_month', followYearMonth.value)
+    const res = await apiFetch(`/follow-lists?${p.toString()}`)
+    followLists.value = (await res.json()).lists || []
+  } catch (e) {
+    followLists.value = []
+  } finally {
+    followLoading.value = false
+  }
+}
+
+function toggleFollowList(key) {
+  followExpanded.value[key] = !followExpanded.value[key]
+}
+function toggleFollowRounds(key) {
+  followRoundsExpanded.value[key] = !followRoundsExpanded.value[key]
+}
+
 
 // ===== 最长跟踪演算 =====
 const showTracking = ref(false)

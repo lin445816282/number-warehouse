@@ -1092,6 +1092,173 @@ def live_trade_advance(scheme, account, draws, dates):
     return new_account, orders
 
 
+def run_follow_lists(draws, dates, warmup=100, stop_miss=2, bet_per_num=1, hot_count=24):
+    """跟号列表回测（4 个策略）：跟踪「最冷25号组 / 最热24号组」，错 stop_miss 次止损 + 命中重跟 + ROI。
+
+    核心：49 个号按遗漏期数划分为两组 ——
+      - 最冷 25 号 = 遗漏期数最大的 25 个号（hot_count 之外）
+      - 最热 24 号 = 遗漏期数最小的 24 个号（hot_count，最近 hot_count 期开出的号）
+
+    策略：
+      cold   — 跟最长：每期跟「最冷 25 号组」（遗漏最大 25 个号）
+      hot    — 跟最新：每期跟「最热 24 号组」（遗漏最小 24 个号）
+      switch — 切换跟号：上一期开奖号开出前遗漏 <= hot_count 视为「热」→ 跟最热24号组；
+                          否则视为「冷」→ 跟最冷25号组
+      both   — 跟最新+最长：同时跟最热24 + 最冷25 = 全 49 号（满仓对照）
+
+    跟踪状态机（每策略独立）：
+      - 空仓 → 按规则选组进场，held=0
+      - 跟踪中 → 每期下注整组；开奖号在组内 → 止盈（+47-cost），重跟；连续 stop_miss 期未中 → 止损，等待
+      - 止损等待 → 等「止损锁定的那组号」中任意一个再次开出（正确）→ 重新跟踪
+
+    资金口径：等额每号 bet_per_num 元，命中赔 47 倍（六合彩单号赔率）。
+      cost = 组内号数 × bet_per_num × held；命中 pnl = 47 - cost；止损 pnl = -cost。
+      ROI = total_pnl / total_invest × 100。
+
+    返回 {lists, latest_date, total_records}，lists 每项含 summary + rounds + current。
+    """
+    M = len(draws)
+    if not M:
+        return {"lists": [], "latest_date": None, "total_records": 0}
+
+    last_seen_idx = {n: -1 for n in range(1, 50)}
+    for t in range(min(warmup, M)):
+        last_seen_idx[draws[t]] = t
+
+    STRATS = [
+        ("cold",   "跟最长（最冷25号）", "每期跟遗漏最大的25个号"),
+        ("hot",    "跟最新（最热24号）", "每期跟遗漏最小的24个号"),
+        ("switch", "切换跟号",           "开热跟热24号、开冷跟冷25号"),
+        ("both",   "跟最新+最长",         "同时跟热24+冷25=全49号"),
+    ]
+    states = {}
+    for key, name, desc in STRATS:
+        states[key] = {
+            "name": name, "desc": desc,
+            "nums": None, "held": 0, "enter_idx": None,
+            "halt": False, "halt_set": set(),
+            "rounds": [], "pnl": 0.0, "invest": 0.0,
+            "hits": 0, "stops": 0,
+        }
+
+    last_draw_gap_before = None  # 上一期开奖号在开出前的遗漏（供 switch 判断热/冷）
+
+    for t in range(warmup, M):
+        gap = {n: (t - last_seen_idx[n]) if last_seen_idx[n] >= 0 else t for n in range(1, 50)}
+        # 按遗漏降序 → 最冷25号（前25），最热24号（后24，遗漏最小）
+        sorted_cold = sorted(range(1, 50), key=lambda x: -gap[x])
+        cold25 = sorted_cold[:25]
+        hot24 = sorted_cold[25:]  # 遗漏最小的 24 个号
+        draw = draws[t]
+
+        for key, s in states.items():
+            # 止损等待：等 halt_set 中任意一个开出
+            if s["halt"]:
+                if draw in s["halt_set"]:
+                    s["halt"] = False
+                    s["halt_set"] = set()
+                    continue  # 解除当天不进场，下一期用更新后的遗漏重新选组
+                else:
+                    continue
+
+            # 空仓选组进场
+            if s["nums"] is None:
+                if key == "cold":
+                    nums = cold25
+                elif key == "hot":
+                    nums = hot24
+                elif key == "switch":
+                    if last_draw_gap_before is not None and last_draw_gap_before <= hot_count:
+                        nums = hot24
+                    else:
+                        nums = cold25
+                else:  # both
+                    nums = sorted(set(cold25) | set(hot24))
+                s["nums"] = nums
+                s["held"] = 0
+                s["enter_idx"] = t
+
+            # 下注
+            s["held"] += 1
+            cost = len(s["nums"]) * bet_per_num * s["held"]
+            if draw in s["nums"]:
+                pnl = 47 - cost
+                s["pnl"] += pnl
+                s["invest"] += cost
+                s["hits"] += 1
+                s["rounds"].append({
+                    "enter_idx": s["enter_idx"], "end_idx": t,
+                    "enter_date": dates[s["enter_idx"]] if s["enter_idx"] is not None else None,
+                    "end_date": dates[t],
+                    "nums": list(s["nums"]), "held": s["held"],
+                    "result": "hit", "pnl": round(pnl, 2), "draw": draw,
+                })
+                s["nums"] = None
+                s["held"] = 0
+            else:
+                if s["held"] >= stop_miss:
+                    pnl = -cost
+                    s["pnl"] += pnl
+                    s["invest"] += cost
+                    s["stops"] += 1
+                    s["rounds"].append({
+                        "enter_idx": s["enter_idx"], "end_idx": t,
+                        "enter_date": dates[s["enter_idx"]] if s["enter_idx"] is not None else None,
+                        "end_date": dates[t],
+                        "nums": list(s["nums"]), "held": s["held"],
+                        "result": "stop", "pnl": round(pnl, 2), "draw": draw,
+                    })
+                    s["halt"] = True
+                    s["halt_set"] = set(s["nums"])
+                    s["nums"] = None
+                    s["held"] = 0
+
+        # 记录本期开奖号开出前的遗漏（供下一期 switch 判断）
+        last_draw_gap_before = gap[draw]
+        last_seen_idx[draw] = t
+
+    lists = []
+    for key, name, desc in STRATS:
+        s = states[key]
+        n_rounds = s["hits"] + s["stops"]
+        hit_rate = (s["hits"] / n_rounds * 100) if n_rounds else 0.0
+        roi = (s["pnl"] / s["invest"] * 100) if s["invest"] else 0.0
+        # 当前状态
+        if s["halt"]:
+            cur_state = "halt"
+            cur_label = "止损等待中"
+        elif s["nums"] is not None:
+            cur_state = "tracking"
+            cur_label = "跟踪中"
+        else:
+            cur_state = "idle"
+            cur_label = "空仓待进场"
+        lists.append({
+            "key": key, "name": name, "desc": desc,
+            "summary": {
+                "rounds": n_rounds, "hits": s["hits"], "stops": s["stops"],
+                "hit_rate": round(hit_rate, 2),
+                "total_pnl": round(s["pnl"], 2),
+                "total_invest": round(s["invest"], 2),
+                "roi": round(roi, 2),
+            },
+            "rounds": s["rounds"],
+            "current": {
+                "state": cur_state, "label": cur_label,
+                "nums": list(s["nums"]) if s["nums"] is not None else (sorted(s["halt_set"]) if s["halt_set"] else []),
+                "held": s["held"],
+                "enter_date": dates[s["enter_idx"]] if (s["enter_idx"] is not None and s["nums"] is not None) else None,
+            },
+        })
+
+    return {
+        "lists": lists,
+        "latest_date": dates[-1],
+        "total_records": M,
+        "params": {"warmup": warmup, "stop_miss": stop_miss, "bet_per_num": bet_per_num, "hot_count": hot_count},
+    }
+
+
 if __name__ == "__main__":
     import time
     dates, draws = load_records()
