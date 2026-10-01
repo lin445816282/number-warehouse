@@ -273,6 +273,13 @@ def init_db():
     try:
         db.execute("ALTER TABLE daily_snapshots ADD COLUMN draw_value_rank INTEGER DEFAULT NULL")
     except Exception: pass
+    # 最长跟踪回测结果：等额/倍投 ROI
+    try:
+        db.execute("ALTER TABLE tracking_results ADD COLUMN eq_roi REAL NOT NULL DEFAULT 0")
+    except Exception: pass
+    try:
+        db.execute("ALTER TABLE tracking_results ADD COLUMN bt_roi REAL NOT NULL DEFAULT 0")
+    except Exception: pass
     # 种子：次数映射值 1-52
     count_values = [0,0,0,25,30,35,40,45,50,55,60,64,72,81,91,102,113,126,140,156,173,191,211,233,257,283,312,343,377,415,456,501,549,603,661,725,795,871,955,1046,1145,1254,1373,1503,1645,1801,1971,2207,2473,2769,3101,3473]
     for i, v in enumerate(count_values):
@@ -330,7 +337,9 @@ def init_db():
             eq_avg REAL NOT NULL DEFAULT 0,
             eq_days_pos INTEGER NOT NULL DEFAULT 0,
             eq_win_rate REAL NOT NULL DEFAULT 0,
+            eq_roi REAL NOT NULL DEFAULT 0,
             bt_pnl REAL NOT NULL DEFAULT 0,
+            bt_roi REAL NOT NULL DEFAULT 0,
             max_drawdown REAL NOT NULL DEFAULT 0,
             UNIQUE(run_id, algo_id, n),
             FOREIGN KEY (run_id) REFERENCES tracking_runs(id)
@@ -5689,11 +5698,11 @@ def _run_backtest_to_db(run_id, min_n, max_n, warmup, years):
     db = get_db()
     db.executemany(
         "INSERT OR REPLACE INTO tracking_results "
-        "(run_id, algo_id, algo_name, desc, n, hits, total, hit_rate, eq_pnl, eq_avg, eq_days_pos, eq_win_rate, bt_pnl, max_drawdown) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "(run_id, algo_id, algo_name, desc, n, hits, total, hit_rate, eq_pnl, eq_avg, eq_days_pos, eq_win_rate, eq_roi, bt_pnl, bt_roi, max_drawdown) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(run_id, r["algo_id"], r["algo_name"], r["desc"], r["n"], r["hits"], r["total"],
           r["hit_rate"], r["eq_pnl"], r["eq_avg"], r["eq_days_pos"], r["eq_win_rate"],
-          r["bt_pnl"], r["max_drawdown"]) for r in rows]
+          r["eq_roi"], r["bt_pnl"], r["bt_roi"], r["max_drawdown"]) for r in rows]
     )
     db.execute(
         "UPDATE tracking_runs SET status='done', total_records=?, date_from=?, date_to=?, "

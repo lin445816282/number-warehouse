@@ -968,6 +968,7 @@
                     <th>基线</th>
                     <th>累计盈利</th>
                     <th>单期均值</th>
+                    <th>ROI</th>
                     <th>最大回撤</th>
                   </tr>
                 </thead>
@@ -983,6 +984,9 @@
                       {{ (trackingSortBy==='eq_pnl' ? r.eq_pnl : r.bt_pnl).toLocaleString() }}
                     </td>
                     <td>{{ (trackingSortBy==='eq_pnl' ? r.eq_avg : (r.bt_pnl / (r.total || 1))).toFixed(2) }}</td>
+                    <td :style="{color: (trackingSortBy==='eq_pnl' ? r.eq_roi : r.bt_roi) >= 0 ? '#34d399' : '#f87171', fontWeight:700}">
+                      {{ ((trackingSortBy==='eq_pnl' ? r.eq_roi : r.bt_roi) ?? 0) >= 0 ? '+' : '' }}{{ (trackingSortBy==='eq_pnl' ? r.eq_roi : r.bt_roi) }}%
+                    </td>
                     <td style="color:#f87171">{{ r.max_drawdown.toLocaleString() }}</td>
                   </tr>
                 </tbody>

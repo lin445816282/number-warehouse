@@ -296,11 +296,13 @@ def run_backtest(draws, dates, count_map, min_n=3, max_n=25, warmup=100):
                 r = results[aid].setdefault(n, {
                     "hits": 0, "total": 0, "eq_pnl": 0, "bt_pnl": 0,
                     "eq_days_pos": 0, "max_drawdown": 0, "cur_drawdown": 0,
+                    "bt_invest": 0,
                 })
                 r["hits"] += 1 if hit else 0
                 r["total"] += 1
                 r["eq_pnl"] += eq_pnl
                 r["bt_pnl"] += bt_pnl
+                r["bt_invest"] += bt_cost
                 if eq_pnl > 0:
                     r["eq_days_pos"] += 1
                 if eq_pnl < 0:
@@ -332,6 +334,7 @@ def build_report(results, min_n, max_n):
             if not r:
                 continue
             total = r["total"]
+            eq_invest = n * total  # 等额：每期 N 号 × 1 元
             rows.append({
                 "algo_id": aid, "algo_name": name, "desc": desc, "n": n,
                 "hits": r["hits"], "total": total,
@@ -340,7 +343,9 @@ def build_report(results, min_n, max_n):
                 "eq_avg": round(r["eq_pnl"] / total, 3) if total else 0,
                 "eq_days_pos": r["eq_days_pos"],
                 "eq_win_rate": round(r["eq_days_pos"] / total * 100, 2) if total else 0,
+                "eq_roi": round(r["eq_pnl"] / eq_invest * 100, 2) if eq_invest else 0.0,
                 "bt_pnl": r["bt_pnl"],
+                "bt_roi": round(r["bt_pnl"] / r["bt_invest"] * 100, 2) if r["bt_invest"] else 0.0,
                 "max_drawdown": r["max_drawdown"],
             })
     return rows
