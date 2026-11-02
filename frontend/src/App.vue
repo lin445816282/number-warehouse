@@ -26,6 +26,7 @@
         <div class="rec-header-actions">
           <button class="rec-btn-analysis" @click="openAnalysis()">📊 分析</button>
           <button class="rec-btn-analysis" @click="openMissingNumbers()">🔢 最长号码</button>
+          <button class="rec-btn-analysis" @click="openPattern()">🧩 规律</button>
           <button class="rec-btn-analysis" @click="openTracking()">🎯 最长跟踪</button>
           <select v-model="recYear" @change="loadRecords()" class="form-input" style="width:auto;padding:6px 10px;font-size:12px">
             <option value="">全部年份</option>
@@ -411,6 +412,75 @@
           </div>
           <div class="form-btns" style="margin-top:12px">
             <button class="btn-cancel" @click="showMissing=false">关闭</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 冷号规律弹窗 -->
+      <div v-if="showPattern" class="form-overlay" @click.self="showPattern=false">
+        <div class="form-card" style="max-width:560px;max-height:88vh;overflow-y:auto">
+          <div class="form-title">🧩 冷号规律</div>
+          <div v-if="patternLoading" style="text-align:center;padding:20px">⏳ 分析中...</div>
+          <div v-else-if="patternData.error" style="color:#dc2626;padding:16px">{{ patternData.error }}</div>
+          <div v-else>
+            <div style="font-size:12px;color:#64748b;margin-bottom:10px">截止 {{ patternData.latest_date }} · 历史最冷号共 {{ (patternData.history||[]).length }} 个变化点（倒序）</div>
+            <div style="font-size:11px;color:#94a3b8;margin-bottom:10px">口径：遗漏周期=本号上次开出→下次开出（未开出则至今）；冷号任期=成为冷号→被取代。小卡片=冷号任期内出现次数；「期前」=距最新期几期。</div>
+
+            <!-- 下单方案 -->
+            <div v-if="recommendCold" style="border:2px solid #f59e0b;border-radius:12px;padding:12px;margin-bottom:12px;background:#fffbeb">
+              <div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:6px">🎯 下单方案（当前冷号 {{ recommendCold.cold }}）</div>
+              <div style="font-size:12px;color:#78350f;line-height:1.6">
+                冷号 <b>{{ recommendCold.cold }}</b> 遗漏 <b>{{ recommendCold.period1_len }}</b> 期，处于极端冷状态。<br>
+                邻居+等差组里「同样久未开出」的号，联动回补预期最强：
+              </div>
+              <div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap">
+                <div v-for="(c, i) in recommendCold.top" :key="'rc'+i" style="border:1px solid #f59e0b;border-radius:8px;padding:6px 10px;text-align:center;background:#fff">
+                  <div style="font-size:16px;font-weight:800;color:#92400e">{{ c.num }}</div>
+                  <div style="font-size:10px;color:#b45309">{{ c.gap }}期未出 · {{ c.count }}次</div>
+                  <div style="font-size:10px;color:#94a3b8">{{ c.type }}</div>
+                </div>
+              </div>
+              <div style="font-size:12px;color:#92400e;font-weight:700">推荐下注：{{ recommendCold.top.map(c => c.num).join('.') }}</div>
+            </div>
+
+            <div v-for="(h, idx) in (patternData.history||[])" :key="'h'+idx" style="border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:12px">
+              <!-- 最冷号头 -->
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border-radius:10px;padding:6px 14px;text-align:center;min-width:76px">
+                  <div style="font-size:10px;color:#2563eb">{{ h.end_date ? h.end_date.slice(5) : '至今' }}</div>
+                  <div style="font-size:28px;font-weight:800;color:#1e40af;line-height:1.1">{{ h.num }}</div>
+                  <div style="font-size:10px;color:#2563eb">{{ h.date.slice(5) }}</div>
+                </div>
+                <div style="flex:1">
+                  <div style="font-size:13px;color:#334155">❄️ 最冷号 <b>{{ h.num }}</b></div>
+                  <div style="font-size:12px;color:#64748b">遗漏周期：<b>{{ h.period1_start }}</b> → {{ h.period1_end || '至今' }} · {{ h.period1_len }} 期</div>
+                  <div style="font-size:12px;color:#b45309">冷号任期：{{ h.date }} → {{ h.end_date || '至今' }} · {{ h.term_len }} 期</div>
+                </div>
+              </div>
+
+              <!-- 左右邻居 -->
+              <div style="font-size:12px;font-weight:700;color:#334155;margin:6px 0 4px">↔️ 左右邻居</div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+                <div v-for="n in h.neighbors" :key="'nb'+idx+'-'+n.num" style="border:1px solid #e2e8f0;border-radius:8px;padding:6px;text-align:center">
+                  <div style="font-size:16px;font-weight:700;color:#1a2a4a">{{ n.num }}</div>
+                  <div style="font-size:10px;color:#64748b">{{ h.date.slice(5) }}→{{ h.end_date ? h.end_date.slice(5) : '今' }} {{ n.count }}次</div>
+                  <div style="font-size:10px;color:#94a3b8">{{ n.gap }}期前</div>
+                </div>
+              </div>
+
+              <!-- 12 等差组 -->
+              <div style="font-size:12px;font-weight:700;color:#334155;margin:6px 0 4px">📐 12等差组（≡{{ h.num % 12 }} mod 12）</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <div v-for="n in h.mod_class" :key="'mc'+idx+'-'+n.num" :style="n.num===h.num ? 'border:2px solid #2563eb;border-radius:8px;padding:6px 10px;text-align:center;background:#eff6ff' : 'border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;text-align:center'">
+                  <div style="font-size:16px;font-weight:700;color:#1a2a4a">{{ n.num }}</div>
+                  <div style="font-size:10px;color:#64748b">{{ h.date.slice(5) }}→{{ h.end_date ? h.end_date.slice(5) : '今' }} {{ n.count }}次</div>
+                  <div style="font-size:10px;color:#94a3b8">{{ n.gap }}期前</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="form-btns" style="margin-top:12px">
+            <button class="btn-cancel" @click="showPattern=false">关闭</button>
           </div>
         </div>
       </div>
@@ -1368,6 +1438,8 @@
             <div class="vote-mode-btns">
               <button :class="{ active: voteDirection === 'positive' }" @click="voteDirection='positive'; loadVote()">📈 正 (25)</button>
               <button :class="{ active: voteDirection === 'negative' }" @click="voteDirection='negative'; loadVote()">📉 负 (24)</button>
+              <button :class="{ active: voteDirection === 'positive36' }" @click="voteDirection='positive36'; loadVote()">📈 正 (36)</button>
+              <button :class="{ active: voteDirection === 'negative13' }" @click="voteDirection='negative13'; loadVote()">📉 负 (13)</button>
             </div>
             <select v-model.number="voteThreshold" @change="loadVote" class="vote-select">
               <option v-for="n in voteOptions" :key="n" :value="n">{{ n }}/{{ voteSelectedStores.length }} 共识</option>
@@ -1381,7 +1453,7 @@
         <!-- 共识号码 -->
         <div v-if="voteResult" style="margin-top:8px">
           <div style="font-size:12px;color:#8899b0;margin-bottom:6px">
-            共识：<b>{{ voteResult.consensus?.length || 0 }}</b> 个号码（{{ voteResult.total_stores }}店{{ voteResult.vote_threshold }}选 · {{ voteResult.direction === 'positive' ? '正25' : '负24' }}）
+            共识：<b>{{ voteResult.consensus?.length || 0 }}</b> 个号码（{{ voteResult.total_stores }}店{{ voteResult.vote_threshold }}选 · {{ directionLabel(voteResult.direction) }}）
           </div>
           <div class="th-nums">
             <span v-for="n in 49" :key="n" class="th-num" :class="voteResult.consensus?.includes(n) ? 'hit' : 'miss'" :title="voteResult.frequencies?.[n] ? '出现'+voteResult.frequencies[n]+'次' : ''">{{ pad2(n) }}</span>
@@ -1391,6 +1463,18 @@
             <span style="font-size:11px;color:#8899b0;word-break:break-all;line-height:1.6;min-width:0">{{ voteResult.consensus?.map(n => pad2(n)).join('.') }}</span>
           </div>
         </div>
+      </div>
+
+      <!-- 按组别归类（前36号 → A-L 组） -->
+      <div v-if="voteResult?.consensus?.length" class="th-block" style="border-left:3px solid #f59e0b !important">
+        <div class="th-block-title">🧩 按组别归类（A-L）</div>
+        <div class="vote-group-grid">
+          <div v-for="g in groupedConsensus" :key="g.group" class="vote-group-cell" :class="{ empty: !g.nums.length }">
+            <div class="vote-group-name">{{ g.group }}</div>
+            <div class="vote-group-nums">{{ g.nums.length ? g.nums.map(n => pad2(n)).join('.') : '—' }}</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-top:6px">共识 {{ voteResult.consensus.length }} 号 · 分布在 {{ groupedConsensus.filter(g => g.nums.length).length }} 组</div>
       </div>
 
       <!-- 投注单（新功能：号码注数累计） -->
@@ -1431,6 +1515,256 @@
           </div>
         </div>
         <div v-else style="font-size:11px;color:#64748b">添加组后，相同号码的注数会自动累加汇总</div>
+      </div>
+
+      <!-- 跟踪36走势 -->
+      <div class="th-block" style="border-left:3px solid #4da6ff !important">
+        <div class="th-block-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>📊 跟踪36走势</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select v-model.number="track36X" @change="loadTrack36" class="vote-select" style="min-width:80px">
+              <option v-for="n in [2,3,4,5,6,7,8]" :key="n" :value="n">≥{{ n }}店</option>
+            </select>
+          </div>
+        </div>
+        <div v-if="track36Data" style="margin-top:8px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+            <div class="track36-stat"><div class="track36-stat-v">{{ track36Data.total_days }}</div><div class="track36-stat-l">总期数</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ track36Data.hits }}</div><div class="track36-stat-l">命中</div></div>
+            <div class="track36-stat"><div class="track36-stat-v" :style="{color: track36Data.hit_rate >= 0 ? '#22c55e' : '#ee0a24'}">{{ track36Data.hit_rate }}%</div><div class="track36-stat-l">命中率</div></div>
+            <div class="track36-stat"><div class="track36-stat-v" :style="{color: track36Data.cum_pnl >= 0 ? '#22c55e' : '#ee0a24'}">{{ track36Data.cum_pnl }}</div><div class="track36-stat-l">累计盈亏</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ track36Data.avg_picked }}</div><div class="track36-stat-l">平均共识号</div></div>
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:6px">等额每号1元 · 命中返47倍 · 最近在上</div>
+          <div style="max-height:380px;overflow-y:auto">
+            <div v-for="d in track36Daily" :key="d.date" style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid #f0f0f0;font-size:12px">
+              <span style="color:#94a3b8;flex-shrink:0">{{ d.date.slice(5) }}</span>
+              <span style="font-weight:700;flex-shrink:0">{{ d.hit ? '✅' : '❌' }}</span>
+              <span style="color:#64748b;flex-shrink:0">开{{ pad2(d.draw) }}</span>
+              <span style="color:#000;flex-shrink:0">{{ d.picked_count }}号</span>
+              <span style="flex:1;text-align:right;font-weight:600" :style="{color: d.pnl >= 0 ? '#22c55e' : '#ee0a24'}">{{ d.pnl >= 0 ? '+' : '' }}{{ d.pnl }}</span>
+              <span style="color:#94a3b8;flex-shrink:0;text-align:right">{{ d.cum_pnl }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="track36Loading" style="font-size:12px;color:#64748b">加载中...</div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据（需先回填历史36/13）</div>
+      </div>
+
+      <!-- 门店走势图（正36号累计值） -->
+      <div class="th-block" style="border-left:3px solid #22c55e !important">
+        <div class="th-block-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>📈 门店走势图 · 各36号累计值</span>
+          <input type="date" v-model="track36ChartDate" @change="loadTrack36Stores" class="th-date-input">
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">{{ track36Stores?.date || '' }} · 8门店 · 前36号按累计值降序（左高右低）</div>
+        <div v-if="track36Stores?.stores?.length">
+          <div v-for="s in track36Stores.stores" :key="s.id" style="margin-bottom:12px">
+            <div style="font-size:12px;color:#000;font-weight:600;margin-bottom:2px">{{ s.name }}</div>
+            <canvas :id="'store-chart-' + s.id" style="width:100%;height:130px;display:block"></canvas>
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px;word-break:break-all;line-height:1.5">{{ s.items36.map(x => pad2(x.num)).join('.') }}</div>
+          </div>
+        </div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据</div>
+      </div>
+
+      <!-- 选几组 · 命中色块矩阵 -->
+      <div class="th-block" style="border-left:3px solid #8b5cf6 !important">
+        <div class="th-block-title">📊 选几组 · 命中色块（点色块看当天号码）</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">选前 K 个高命中率记录组 · 命中=当天开奖号在 K 组36号并集里 · 🟩命中 🟥未中</div>
+        <div v-if="track36Matrix?.matrix?.length">
+          <div v-for="row in track36Matrix.matrix" :key="row.K" style="margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+              <span style="font-size:12px;font-weight:700;color:#000">选 {{ row.K }} 组</span>
+              <span style="font-size:11px;color:#64748b">{{ row.union_count }}号 · 命中 {{ row.hits }}/{{ row.total }}（{{ row.hit_rate }}%）</span>
+            </div>
+            <div v-for="mo in row.monthly" :key="mo.month" style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+              <span style="font-size:10px;color:#94a3b8;flex-shrink:0;width:30px">{{ mo.month.slice(5) }}月</span>
+              <div style="display:flex;flex-wrap:wrap;gap:2px">
+                <span v-for="day in mo.days" :key="day.d" :class="['rec-hit-cell', day.hit ? 'hit' : 'miss', 'clickable']" :title="mo.month+'-'+day.d" @click="openMatrixDay(row.K, row.union, day, mo.month)"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据</div>
+      </div>
+
+      <!-- 当天号码弹窗 -->
+      <div v-if="matrixDayPopup" class="form-overlay" @click.self="closeMatrixDay">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">{{ matrixDayPopup.date }} · 选 {{ matrixDayPopup.K }} 组</div>
+          <div style="margin:10px 0;font-size:14px">
+            开奖号 <b :style="{color: matrixDayPopup.hit ? '#22c55e' : '#ee0a24'}">{{ pad2(matrixDayPopup.draw) }}</b>
+            <span :style="{color: matrixDayPopup.hit ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ matrixDayPopup.hit ? ' ✅ 命中' : ' ❌ 未中' }}</span>
+          </div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:4px">K 组36号并集（{{ matrixDayPopup.union.length }}号）：</div>
+          <div style="font-size:12px;color:#000;word-break:break-all;line-height:1.7">{{ matrixDayPopup.union.map(n => pad2(n)).join('.') }}</div>
+          <button class="btn-add" @click="closeMatrixDay" style="margin-top:12px;width:100%">关闭</button>
+        </div>
+      </div>
+
+      <!-- 投票选号扫描 -->
+      <div class="th-block" style="border-left:3px solid #f59e0b !important">
+        <div class="th-block-title">🗳️ 投票选号扫描（票数阈值 1~25）</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">25 记录组投票 · 共识号=被≥T组覆盖 · 等额下注·命中返47 · 🟢命中率最高 🟠ROI最高(最不亏)</div>
+        <div v-if="track36VoteScan?.scan?.length">
+          <div style="display:grid;grid-template-columns:0.7fr 0.9fr 0.9fr 0.9fr;background:#f5f7fa;font-size:11px;color:#64748b;padding:5px 8px;border-radius:6px 6px 0 0">
+            <span>T票数</span><span>均共识号</span><span>命中率</span><span>ROI</span>
+          </div>
+          <div style="max-height:340px;overflow-y:auto;border:1px solid #eee;border-radius:0 0 6px 6px">
+            <div v-for="it in track36VoteScan.scan" :key="it.T" style="display:grid;grid-template-columns:0.7fr 0.9fr 0.9fr 0.9fr;font-size:12px;color:#000;padding:4px 8px;border-top:1px solid #f0f0f0;align-items:center"
+                 :style="it.T === track36VoteScan.best_hit_rate ? {background:'#f0fdf4'} : it.T === track36VoteScan.best_roi ? {background:'#fff7ed'} : {}">
+              <span style="font-weight:700">{{ it.T }}{{ it.T === track36VoteScan.best_hit_rate ? ' 🟢' : '' }}{{ it.T === track36VoteScan.best_roi ? ' 🟠' : '' }}</span>
+              <span>{{ it.avg_picked }}</span>
+              <span>{{ it.hit_rate }}%</span>
+              <span :style="{color: it.roi >= 0 ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ it.roi }}%</span>
+            </div>
+          </div>
+        </div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据</div>
+      </div>
+
+      <!-- 逐日投票 · 出现次数分档 -->
+      <div class="th-block" style="border-left:3px solid #10b981 !important">
+        <div class="th-block-title">🎯 逐日投票 · 出现次数分档（取恰好N次）</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">每天用当天25记录组36号投票 · 按号码被选次数(1~25)分档 · 等额下注·命中返47 · 🟢命中率最高 🟠ROI最高(命中≥20次)</div>
+        <div v-if="track36VoteFreq?.scan?.length">
+          <div style="display:grid;grid-template-columns:0.6fr 0.8fr 0.8fr 0.9fr 0.9fr;background:#f5f7fa;font-size:11px;color:#64748b;padding:5px 8px;border-radius:6px 6px 0 0">
+            <span>出现次</span><span>均号</span><span>命中</span><span>命中率</span><span>ROI</span>
+          </div>
+          <div style="max-height:340px;overflow-y:auto;border:1px solid #eee;border-radius:0 0 6px 6px">
+            <div v-for="it in track36VoteFreq.scan" :key="it.c" style="display:grid;grid-template-columns:0.6fr 0.8fr 0.8fr 0.9fr 0.9fr;font-size:12px;color:#000;padding:4px 8px;border-top:1px solid #f0f0f0;align-items:center"
+                 :style="it.c === track36VoteFreq.best_hit_rate ? {background:'#f0fdf4'} : it.c === track36VoteFreq.best_roi ? {background:'#fff7ed'} : {}">
+              <span style="font-weight:700">{{ it.c }}{{ it.c === track36VoteFreq.best_hit_rate ? ' 🟢' : '' }}{{ it.c === track36VoteFreq.best_roi ? ' 🟠' : '' }}</span>
+              <span>{{ it.avg_picked }}</span>
+              <span>{{ it.hits }}</span>
+              <span>{{ it.hit_rate }}%</span>
+              <span :style="{color: it.roi >= 0 ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ it.roi }}%</span>
+            </div>
+          </div>
+
+          <div style="font-size:12px;font-weight:700;color:#000;margin:12px 0 4px">📐 出现次数区间演算</div>
+          <div style="display:grid;grid-template-columns:1fr 0.8fr 0.8fr 0.9fr 0.9fr;background:#f5f7fa;font-size:11px;color:#64748b;padding:5px 8px;border-radius:6px 6px 0 0">
+            <span>区间</span><span>均号</span><span>命中</span><span>命中率</span><span>ROI</span>
+          </div>
+          <div style="border:1px solid #eee;border-radius:0 0 6px 6px">
+            <div v-for="iv in track36VoteFreq.intervals" :key="iv.lo+'-'+iv.hi" style="display:grid;grid-template-columns:1fr 0.8fr 0.8fr 0.9fr 0.9fr;font-size:12px;color:#000;padding:4px 8px;border-top:1px solid #f0f0f0;align-items:center">
+              <span style="font-weight:700">{{ iv.lo }}~{{ iv.hi }}</span>
+              <span>{{ iv.avg_picked }}</span>
+              <span>{{ iv.hits }}</span>
+              <span>{{ iv.hit_rate }}%</span>
+              <span :style="{color: iv.roi >= 0 ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ iv.roi }}%</span>
+            </div>
+          </div>
+
+          <div style="font-size:12px;font-weight:700;color:#000;margin:12px 0 4px">📅 18~19 区间 · 月度命中色块（点色块看当天号码）</div>
+          <div v-if="track36VoteFreq?.monthly?.length">
+            <div v-for="mo in track36VoteFreq.monthly" :key="mo.month" style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+              <span style="font-size:10px;color:#94a3b8;flex-shrink:0;width:30px">{{ mo.month.slice(5) }}月</span>
+              <div style="display:flex;flex-wrap:wrap;gap:2px">
+                <span v-for="day in mo.days" :key="day.d" :class="['rec-hit-cell', day.hit ? 'hit' : 'miss', 'clickable']" :title="mo.month+'-'+day.d" @click="openVoteFreqDay(mo.month, day)"></span>
+              </div>
+            </div>
+          </div>
+          <div v-else style="font-size:11px;color:#64748b">暂无色块数据</div>
+        </div>
+        <div v-else-if="track36VoteFreqLoading" style="font-size:12px;color:#64748b">演算中（约6秒）...</div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据</div>
+      </div>
+
+      <!-- 18~19 当天号码弹窗 -->
+      <div v-if="voteFreqDayPopup" class="form-overlay" @click.self="voteFreqDayPopup = null">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">{{ voteFreqDayPopup.date }} · 出现次数18~19</div>
+          <div style="margin:10px 0;font-size:14px">
+            开奖号 <b :style="{color: voteFreqDayPopup.hit ? '#22c55e' : '#ee0a24'}">{{ pad2(voteFreqDayPopup.draw) }}</b>
+            <span :style="{color: voteFreqDayPopup.hit ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ voteFreqDayPopup.hit ? ' ✅ 命中' : ' ❌ 未中' }}</span>
+          </div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:4px">当天出现次数18~19的号码（{{ voteFreqDayPopup.picked.length }}号）：</div>
+          <div style="font-size:12px;color:#000;word-break:break-all;line-height:1.7">{{ voteFreqDayPopup.picked.map(n => pad2(n)).join('.') }}</div>
+          <button class="btn-add" @click="voteFreqDayPopup = null" style="margin-top:12px;width:100%">关闭</button>
+        </div>
+      </div>
+
+      <!-- 30天选组 · 出现次数12~16 -->
+      <div class="th-block" style="border-left:3px solid #e11d48 !important">
+        <div class="th-block-title">🎯 30天选组 · 出现次数8~20（错误最少20组）</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:8px">逐日滚动30期 · 取错误最少20组投票 · 出现次数8~20手动选 · 等额47倍 · 🟩命中🟥未中</div>
+        <div v-if="voteTop20?.monthly?.length">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px" v-if="voteTop20.summary">
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20.summary.total }}</div><div class="track36-stat-l">总期数</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20.summary.hits }}</div><div class="track36-stat-l">命中</div></div>
+            <div class="track36-stat"><div class="track36-stat-v" :style="{color:'#22c55e'}">{{ voteTop20.summary.hit_rate }}%</div><div class="track36-stat-l">命中率</div></div>
+            <div class="track36-stat"><div class="track36-stat-v" :style="{color: voteTop20.summary.roi >= 0 ? '#22c55e' : '#ee0a24'}">{{ voteTop20.summary.roi }}%</div><div class="track36-stat-l">ROI</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20.summary.avg_picked }}</div><div class="track36-stat-l">均号</div></div>
+          </div>
+          <div style="font-size:12px;font-weight:700;color:#000;margin:10px 0 4px">📊 出现次数8~20 · 单档位ROI（点档位切换下方色块 + 今天号码）</div>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:10px">
+            <div v-for="it in voteTop20.freq_scan" :key="it.c" @click="toggleVoteTop20Freq(it.c)"
+                 style="text-align:center;border:1px solid #e0e0e0;border-radius:6px;padding:4px 2px;cursor:pointer"
+                 :style="voteTop20Freq.includes(it.c) ? {background:'#fef2f2', borderColor:'#e11d48'} : {}">
+              <div style="font-size:10px;color:#94a3b8">{{ it.c }}次</div>
+              <div style="font-size:11px;font-weight:700" :style="{color: it.roi >= 0 ? '#22c55e' : '#ee0a24'}">{{ it.roi }}%</div>
+              <div style="font-size:9px;color:#94a3b8">{{ it.hit_rate }}%·{{ it.avg_picked }}号</div>
+            </div>
+          </div>
+          <div v-if="voteTop20.today" style="margin-bottom:10px;padding:8px;background:#fef2f2;border-radius:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <div style="font-size:12px;font-weight:700;color:#000">今天 {{ voteTop20.today.date }} · 出现 {{ voteTop20Freq.join('/') }} 次（{{ voteTop20TodayNums.length }}号）</div>
+              <button class="th-copy-btn" @click="copyVoteTop20Today()" :disabled="!voteTop20TodayNums.length">📋 复制</button>
+            </div>
+            <div style="font-size:12px;color:#000;word-break:break-all;line-height:1.7">{{ voteTop20TodayNums.map(n => pad2(n)).join('.') || '（该档位今天暂无号码）' }}</div>
+          </div>
+          <div style="font-size:12px;font-weight:700;color:#000;margin:10px 0 4px">📅 月份筛选（点选 · 显示对应结果值）</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">
+            <button class="vote-tgl-btn" :class="{ on: !voteTop20Months.length }" @click="selectAllVoteTop20Months()" style="font-size:11px;padding:3px 8px">全选</button>
+            <button v-for="m in allVoteTop20Months" :key="m" class="vote-tgl-btn" :class="{ on: voteTop20Months.includes(m) }" @click="toggleVoteTop20Month(m)" style="font-size:11px;padding:3px 8px">{{ m.slice(5) }}月</button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20MonthSummary.days }}</div><div class="track36-stat-l">天数</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20MonthSummary.hits }}</div><div class="track36-stat-l">命中</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20MonthSummary.hitRate }}%</div><div class="track36-stat-l">命中率</div></div>
+            <div class="track36-stat"><div class="track36-stat-v" :style="{color: Number(voteTop20MonthSummary.roi) >= 0 ? '#22c55e' : '#ee0a24'}">{{ voteTop20MonthSummary.roi }}%</div><div class="track36-stat-l">ROI</div></div>
+            <div class="track36-stat"><div class="track36-stat-v">{{ voteTop20MonthSummary.avgPicked }}</div><div class="track36-stat-l">均号</div></div>
+          </div>
+          <div style="font-size:11px;color:#64748b;margin:6px 0 2px">下方色块：<b>出现 {{ voteTop20Freq.join('/') }} 次</b>（点上方档位多选）</div>
+          <div v-for="mo in voteTop20FilteredMonthly" :key="mo.month" style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+            <span style="font-size:10px;color:#94a3b8;flex-shrink:0;width:30px">{{ mo.month.slice(5) }}月</span>
+            <div style="display:flex;flex-wrap:wrap;gap:2px">
+              <span v-for="day in mo.days" :key="day.d" :class="['rec-hit-cell', day.hit ? 'hit' : 'miss', 'clickable']" :title="mo.month+'-'+day.d" @click="openVoteTop20Day(mo.month, day)"></span>
+            </div>
+          </div>
+          <!-- 36码投票当天显示列表（追加） -->
+          <div v-if="vote36List.length" style="margin-top:14px;padding:8px;background:#f8fafc;border-radius:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div style="font-size:12px;font-weight:700;color:#000">📋 36码投票当天显示列表（{{ voteTop20.today.date }}）</div>
+              <button class="th-copy-btn" @click="copyVote36List()">📋 复制列表</button>
+            </div>
+            <div style="font-size:11px;color:#64748b;margin-bottom:6px">近30期错4以内数据统计---共20条---仅供参考，对错勿怪!</div>
+            <div v-for="it in vote36List" :key="it.c" style="font-size:12px;color:#000;padding:2px 0;border-bottom:1px dashed #eef2f7">
+              <span style="font-weight:700;color:#1e3a5f">{{ it.c }}次</span>
+              <span style="margin:0 4px;color:#64748b">|</span>
+              <span style="word-break:break-all">{{ it.nums.map(n => pad2(n)).join('.') }}</span>
+              <span style="margin-left:6px;color:#64748b">{{ it.nums.length }}个</span>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="voteTop20Loading" style="font-size:12px;color:#64748b">演算中（约8秒）...</div>
+        <div v-else style="font-size:12px;color:#64748b">暂无数据</div>
+      </div>
+
+      <!-- 12~16 当天号码弹窗 -->
+      <div v-if="voteTop20DayPopup" class="form-overlay" @click.self="voteTop20DayPopup = null">
+        <div class="form-card" style="max-width:380px">
+          <div class="form-title">{{ voteTop20DayPopup.date }} · 出现次数12~16</div>
+          <div style="margin:10px 0;font-size:14px">
+            开奖号 <b :style="{color: voteTop20DayPopup.hit ? '#22c55e' : '#ee0a24'}">{{ pad2(voteTop20DayPopup.draw) }}</b>
+            <span :style="{color: voteTop20DayPopup.hit ? '#22c55e' : '#ee0a24', fontWeight:700}">{{ voteTop20DayPopup.hit ? ' ✅ 命中' : ' ❌ 未中' }}</span>
+          </div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:4px">当天出现次数12~16的号码（{{ voteTop20DayPopup.picked.length }}号）：</div>
+          <div style="font-size:12px;color:#000;word-break:break-all;line-height:1.7">{{ voteTop20DayPopup.picked.map(n => pad2(n)).join('.') }}</div>
+          <button class="btn-add" @click="voteTop20DayPopup = null" style="margin-top:12px;width:100%">关闭</button>
+        </div>
       </div>
     </div>
 
@@ -2684,6 +3018,15 @@ function initVoteStores() {
 async function loadVoteStores() {
   // 从独立接口获取门店列表（投票tab专用）
   voteMsg.value = ''; voteMsgType.value = ''
+  loadGroupMapping()
+  loadTrack36()
+  loadTrack36Stores()
+  loadTrack36Records()
+  loadTrack36Roi()
+  loadTrack36Matrix()
+  loadTrack36VoteScan()
+  loadTrack36VoteFreq()
+  loadVoteTop20()
   try {
     const q = voteDate.value ? '?date=' + voteDate.value : ''
     const r = await fetch('api/vote/stores' + q, { credentials: 'include' })
@@ -2727,6 +3070,321 @@ async function loadVote() {
     voteResult.value = d.ok ? d : null
   } catch(e) { voteResult.value = null }
 }
+
+function directionLabel(d) {
+  return { positive: '正25', negative: '负24', positive36: '正36', negative13: '负13' }[d] || (d || '')
+}
+
+// ===== 按组别归类（1-49 → A-L） =====
+const groupMapping = ref({})  // {num: 'A'}
+const groupOrder = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L']
+const groupedConsensus = computed(() => {
+  const buckets = {}
+  for (const n of (voteResult.value?.consensus || [])) {
+    const g = groupMapping.value[n] || '?'
+    if (!buckets[g]) buckets[g] = []
+    buckets[g].push(n)
+  }
+  return groupOrder.map(g => ({
+    group: g,
+    nums: (buckets[g] || []).slice().sort((a, b) => a - b)
+  }))
+})
+async function loadGroupMapping() {
+  try {
+    const r = await fetch('api/group-mapping', { credentials: 'include' })
+    const d = await r.json()
+    const map = {}
+    for (const m of (d.mapping || [])) map[m.num] = m.group
+    groupMapping.value = map
+  } catch (e) {}
+}
+
+// ===== 跟踪36走势 =====
+const track36Data = ref(null)
+const track36X = ref(5)
+const track36Loading = ref(false)
+const track36Daily = computed(() => {
+  const d = track36Data.value?.daily || []
+  return [...d].reverse()
+})
+async function loadTrack36() {
+  track36Loading.value = true
+  try {
+    const r = await fetch('api/track-36?x=' + track36X.value, { credentials: 'include' })
+    const d = await r.json()
+    track36Data.value = d.ok ? d : null
+  } catch (e) { track36Data.value = null }
+  finally { track36Loading.value = false }
+}
+
+// ===== 门店走势图 =====
+const track36Stores = ref(null)
+const track36ChartDate = ref('')
+async function loadTrack36Stores() {
+  try {
+    const q = track36ChartDate.value ? '?date=' + track36ChartDate.value : ''
+    const r = await fetch('api/track-36/stores' + q, { credentials: 'include' })
+    const d = await r.json()
+    track36Stores.value = d.ok ? d : null
+    if (d.ok && d.date) track36ChartDate.value = d.date
+    await nextTick()
+    renderAllStoreCharts()
+  } catch (e) { track36Stores.value = null }
+}
+function renderAllStoreCharts() {
+  const stores = track36Stores.value?.stores || []
+  stores.forEach(s => {
+    const canvas = document.getElementById('store-chart-' + s.id)
+    if (canvas) renderStoreChart(s, canvas)
+  })
+}
+function renderStoreChart(store, canvas) {
+  const items = store.items36 || []
+  if (!items.length) return
+  const W = canvas.parentElement?.clientWidth || 340
+  const H = 130
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = W * dpr
+  canvas.height = H * dpr
+  canvas.style.width = W + 'px'
+  canvas.style.height = H + 'px'
+  const ctx = canvas.getContext('2d')
+  ctx.scale(dpr, dpr)
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H)
+
+  const n = items.length
+  const padL = 10, padR = 10, padT = 12, padB = 16
+  const maxV = items[0].value, minV = items[n - 1].value
+  const xp = i => padL + (i / (n - 1)) * (W - padL - padR)
+  const yp = v => padT + (1 - (v - minV) / (maxV - minV || 1)) * (H - padT - padB)
+
+  // 面积填充
+  ctx.fillStyle = 'rgba(41,121,255,0.08)'
+  ctx.beginPath(); ctx.moveTo(xp(0), H - padB)
+  for (let i = 0; i < n; i++) ctx.lineTo(xp(i), yp(items[i].value))
+  ctx.lineTo(xp(n - 1), H - padB); ctx.closePath(); ctx.fill()
+
+  // 折线
+  ctx.strokeStyle = '#2979ff'; ctx.lineWidth = 1.5
+  ctx.beginPath(); ctx.moveTo(xp(0), yp(items[0].value))
+  for (let i = 1; i < n; i++) ctx.lineTo(xp(i), yp(items[i].value))
+  ctx.stroke()
+
+  // 首尾号码标注
+  ctx.fillStyle = '#2979ff'; ctx.font = 'bold 10px sans-serif'
+  ctx.textAlign = 'left'
+  ctx.fillText(pad2(items[0].num), xp(0), yp(items[0].value) - 4)
+  ctx.textAlign = 'right'
+  ctx.fillText(pad2(items[n - 1].num), xp(n - 1), yp(items[n - 1].value) + 10)
+
+  // x轴刻度
+  ctx.fillStyle = '#bbb'; ctx.font = '9px sans-serif'
+  ctx.textAlign = 'left'; ctx.fillText('1', xp(0), H - 3)
+  ctx.textAlign = 'right'; ctx.fillText('36', xp(n - 1), H - 3)
+}
+
+// ===== 记录组36号 · 月度命中 =====
+const track36Records = ref(null)
+const track36RecordsDate = ref('')
+async function loadTrack36Records() {
+  try {
+    const q = track36RecordsDate.value ? '?date=' + track36RecordsDate.value : ''
+    const r = await fetch('api/track-36/records' + q, { credentials: 'include' })
+    const d = await r.json()
+    track36Records.value = d.ok ? d : null
+    if (d.ok && d.date) track36RecordsDate.value = d.date
+  } catch (e) { track36Records.value = null }
+}
+
+// ===== 命中记录数 · 月度 + ROI区间 =====
+const track36Roi = ref(null)
+const track36RoiN = ref(19)
+async function loadTrack36Roi() {
+  try {
+    const r = await fetch('api/track-36/roi?n=' + track36RoiN.value, { credentials: 'include' })
+    const d = await r.json()
+    track36Roi.value = d.ok ? d : null
+  } catch (e) { track36Roi.value = null }
+}
+function kColor(k) {
+  // K 0-25 → 颜色（低=浅灰，高=深绿）
+  if (k <= 0) return '#e2e8f0'
+  const t = Math.min(1, k / 25)
+  return `hsl(${Math.round(140 - 40 * t)}, 60%, ${Math.round(70 - 30 * t)}%)`
+}
+
+// ===== 选几组 · 命中色块矩阵 =====
+const track36Matrix = ref(null)
+const matrixDayPopup = ref(null)  // {K, date, draw, hit, union}
+async function loadTrack36Matrix() {
+  try {
+    const r = await fetch('api/track-36/matrix', { credentials: 'include' })
+    const d = await r.json()
+    track36Matrix.value = d.ok ? d : null
+  } catch (e) { track36Matrix.value = null }
+}
+function openMatrixDay(K, union, day, month) {
+  matrixDayPopup.value = {
+    K, union,
+    date: month + '-' + day.d,
+    draw: day.draw, hit: day.hit,
+  }
+}
+function closeMatrixDay() { matrixDayPopup.value = null }
+
+// ===== 投票选号扫描（T=1~25） =====
+const track36VoteScan = ref(null)
+async function loadTrack36VoteScan() {
+  try {
+    const r = await fetch('api/track-36/vote-scan', { credentials: 'include' })
+    const d = await r.json()
+    track36VoteScan.value = d.ok ? d : null
+  } catch (e) { track36VoteScan.value = null }
+}
+
+// ===== 逐日投票 · 出现次数分档 =====
+const track36VoteFreq = ref(null)
+const track36VoteFreqLoading = ref(false)
+async function loadTrack36VoteFreq() {
+  track36VoteFreqLoading.value = true
+  try {
+    const r = await fetch('api/track-36/vote-freq', { credentials: 'include' })
+    const d = await r.json()
+    track36VoteFreq.value = d.ok ? d : null
+  } catch (e) { track36VoteFreq.value = null }
+  finally { track36VoteFreqLoading.value = false }
+}
+
+const voteFreqDayPopup = ref(null)
+function openVoteFreqDay(month, day) {
+  voteFreqDayPopup.value = {
+    date: month + '-' + day.d,
+    draw: day.draw, hit: day.hit, picked: day.picked,
+  }
+}
+
+// ===== 30天选组 · 出现次数12~16 =====
+const voteTop20 = ref(null)
+const voteTop20Loading = ref(false)
+const voteTop20DayPopup = ref(null)
+async function loadVoteTop20() {
+  voteTop20Loading.value = true
+  try {
+    const r = await fetch('api/track-36/vote-top20', { credentials: 'include' })
+    const d = await r.json()
+    voteTop20.value = d.ok ? d : null
+  } catch (e) { voteTop20.value = null }
+  finally { voteTop20Loading.value = false }
+}
+function openVoteTop20Day(month, day) {
+  voteTop20DayPopup.value = {
+    date: month + '-' + day.d,
+    draw: day.draw, hit: day.hit, picked: day.picked,
+  }
+}
+const voteTop20Freq = ref([15])
+function toggleVoteTop20Freq(c) {
+  const arr = voteTop20Freq.value
+  voteTop20Freq.value = arr.includes(c) ? arr.filter(x => x !== c) : [...arr, c].sort((a, b) => a - b)
+}
+const voteTop20DisplayMonthly = computed(() => {
+  const d = voteTop20.value
+  const sel = voteTop20Freq.value
+  if (!d || !sel.length) return []
+  const items = (d.freq_scan || []).filter(x => sel.includes(x.c))
+  if (!items.length) return []
+  const dayMap = {}
+  for (const it of items) {
+    for (const mo of it.monthly) {
+      for (const day of mo.days) {
+        const key = mo.month + '-' + day.d
+        if (!dayMap[key]) dayMap[key] = { draw: day.draw, nums: new Set() }
+        for (const n of day.picked) dayMap[key].nums.add(n)
+      }
+    }
+  }
+  const keys = Object.keys(dayMap).sort()
+  const monthly = []
+  let cur = null
+  for (const key of keys) {
+    const m = key.slice(0, 7)
+    const picked = [...dayMap[key].nums].sort((a, b) => a - b)
+    const draw = dayMap[key].draw
+    if (m !== cur) {
+      monthly.push({ month: m, days: [] })
+      cur = m
+    }
+    monthly[monthly.length - 1].days.push({ d: key.slice(8), draw, hit: picked.includes(draw), picked })
+  }
+  return monthly
+})
+const voteTop20TodayNums = computed(() => {
+  const d = voteTop20.value
+  if (!d || !d.today || !voteTop20Freq.value.length) return []
+  const s = new Set()
+  for (const c of voteTop20Freq.value) {
+    for (const n of (d.today.freq[String(c)] || [])) s.add(n)
+  }
+  return [...s].sort((a, b) => a - b)
+})
+function copyVoteTop20Today() {
+  const nums = voteTop20TodayNums.value
+  if (!nums.length) return
+  navigator.clipboard.writeText(nums.map(n => pad2(n)).join('.'))
+    .then(() => $notify(`已复制${nums.length}个号码`), () => $notify('复制失败', true))
+}
+// 36码投票当天显示列表：把 vote-top20 当天20组投票的票数分布（8~20档）转成「X次 → 号码 → N个」列表
+const vote36List = computed(() => {
+  const d = voteTop20.value
+  if (!d || !d.today || !d.today.freq) return []
+  const out = []
+  for (const [c, nums] of Object.entries(d.today.freq)) {
+    if (nums && nums.length) out.push({ c: Number(c), nums })
+  }
+  return out.sort((a, b) => a.c - b.c)
+})
+function copyVote36List() {
+  const list = vote36List.value
+  const d = voteTop20.value
+  if (!list.length) return
+  const head = '近30期错4以内数据统计---共20条---仅供参考，对错勿怪!'
+  const lines = list.map(it => `${it.c}次\t${it.nums.map(n => pad2(n)).join('.')}\t${it.nums.length}个`)
+  navigator.clipboard.writeText([head, ...lines].join('\n'))
+    .then(() => $notify('已复制36码投票当天列表'), () => $notify('复制失败', true))
+}
+const voteTop20Months = ref([])
+const allVoteTop20Months = computed(() => {
+  return voteTop20DisplayMonthly.value.map(mo => mo.month)
+})
+function toggleVoteTop20Month(m) {
+  const arr = voteTop20Months.value
+  voteTop20Months.value = arr.includes(m) ? arr.filter(x => x !== m) : [...arr, m]
+}
+function selectAllVoteTop20Months() {
+  voteTop20Months.value = []
+}
+const voteTop20FilteredMonthly = computed(() => {
+  const sel = voteTop20Months.value
+  const all = voteTop20DisplayMonthly.value
+  if (!sel.length) return all
+  return all.filter(mo => sel.includes(mo.month))
+})
+const voteTop20MonthSummary = computed(() => {
+  const monthly = voteTop20FilteredMonthly.value
+  let days = 0, hits = 0, cost = 0
+  for (const mo of monthly) {
+    for (const day of mo.days) {
+      days += 1
+      cost += day.picked.length
+      if (day.hit) hits += 1
+    }
+  }
+  const hitRate = days ? (hits / days * 100).toFixed(1) : '0.0'
+  const roi = cost ? ((hits * 47 - cost) / cost * 100).toFixed(1) : '0.0'
+  const avgPicked = days ? (cost / days).toFixed(1) : '0.0'
+  return { days, hits, hitRate, roi, avgPicked }
+})
 
 function pad2(n) { return String(n).padStart(2, '0') }
 
@@ -2979,6 +3637,33 @@ const missingLoading = ref(false)
 const missingData = ref({})
 const missingDate = ref('')
 
+const showPattern = ref(false)
+const patternLoading = ref(false)
+const patternData = ref({})
+
+// 下单方案：基于当前冷号的邻居+等差组冷热度，推荐「联动回补」下注号
+const recommendCold = computed(() => {
+  const h = (patternData.value.history || [])[0]
+  if (!h) return null
+  const cands = []
+  for (const n of h.neighbors || []) {
+    cands.push({ num: n.num, count: n.count, gap: n.gap, type: '邻居' })
+  }
+  for (const n of h.mod_class || []) {
+    if (n.num === h.num) continue
+    cands.push({ num: n.num, count: n.count, gap: n.gap, type: '等差组' })
+  }
+  // 回补预期排序：gap（距最新期）越大越久没出越优先；同 gap 时 count 越少越冷越优先
+  cands.sort((a, b) => b.gap - a.gap || a.count - b.count)
+  return {
+    cold: h.num,
+    period1_len: h.period1_len,
+    term_len: h.term_len,
+    top: cands.slice(0, 3),
+    all: cands,
+  }
+})
+
 async function fetchMissing() {
   missingLoading.value = true; missingData.value = {}
   try {
@@ -3001,6 +3686,21 @@ async function openMissingNumbers() {
   await fetchMissing()
   loadLongestLog()
   loadFollowLists()
+}
+
+async function openPattern() {
+  showPattern.value = true
+  patternLoading.value = true
+  patternData.value = {}
+  try {
+    const res = await fetch(`${API}/cold-pattern-history`)
+    const data = await res.json()
+    patternData.value = data
+  } catch (e) {
+    patternData.value = { error: e.message }
+  } finally {
+    patternLoading.value = false
+  }
 }
 
 const missingSortedCode = computed(() => {
@@ -5861,6 +6561,39 @@ body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #
 .vote-mode-btns button:first-child { border-right: 1px solid #e0e0e0; }
 .vote-mode-btns button.active { background: #f59e0b; color: #fff; font-weight: 700; }
 .vote-mode-btns button:not(.active):hover { background: #fef3c7; color: #b45309; }
+
+/* 按组别归类（A-L） */
+.vote-group-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+}
+.vote-group-cell {
+  border: 1px solid #e0e0e0; border-radius: 8px; background: #fff;
+  padding: 6px 8px; min-height: 44px;
+}
+.vote-group-cell.empty { background: #fafafa; opacity: .7; }
+.vote-group-name {
+  font-size: 12px; font-weight: 700; color: #f59e0b; margin-bottom: 2px;
+}
+.vote-group-nums {
+  font-size: 11px; color: #000; word-break: break-all; line-height: 1.5;
+}
+.vote-group-cell.empty .vote-group-nums { color: #cbd5e1; }
+
+/* 跟踪36走势 */
+.track36-stat {
+  flex: 1; min-width: 60px; text-align: center;
+  background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 6px 4px;
+}
+.track36-stat-v { font-size: 15px; font-weight: 700; color: #000; }
+.track36-stat-l { font-size: 10px; color: #94a3b8; margin-top: 1px; }
+
+/* 记录组36号 月度命中色块 */
+.rec-hit-cell {
+  width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+}
+.rec-hit-cell.hit { background: #22c55e; }
+.rec-hit-cell.miss { background: #fca5a5; }
+.rec-hit-cell.clickable { cursor: pointer; }
 
 /* 共识下拉 */
 .vote-select {

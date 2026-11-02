@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 import sqlite3
+import bisect
 
 from auth import auth_router, AuthMiddleware, init_auth_db
 from tracking_engine import (
@@ -4630,6 +4631,20 @@ def get_direct_mapping():
     return {"mapping": result, "source": "base"}
 
 
+@app.get("/api/group-mapping")
+def get_group_mapping():
+    """返回完整 1-49 → A-L 组映射：BASE_GROUPS 打底，direct_mapping 表覆盖。"""
+    db = get_db()
+    overrides = {r["num"]: r["group_name"] for r in db.execute("SELECT num, group_name FROM direct_mapping").fetchall()}
+    db.close()
+    result = []
+    for g, nums in BASE_GROUPS.items():
+        for n in nums:
+            result.append({"num": n, "group": overrides.get(n, g)})
+    result.sort(key=lambda x: x["num"])
+    return {"mapping": result}
+
+
 @app.put("/api/direct-mapping/{num}")
 def update_direct_mapping(num: int, group_name: str = Query(...)):
     """更新某数字的归属组。同时重置该数字为默认值用 DELETE"""
@@ -4713,16 +4728,16 @@ def _compute_threshold_one_date(use_date, db=None):
                     pos[num] += val
         sorted_pos = sorted(pos.items(), key=lambda x: x[1], reverse=True)
         all_nums = [num for num, _ in sorted_pos]
-        return all_nums[:25], all_nums[25:]
+        return all_nums[:25], all_nums[25:], all_nums[13:], all_nums[36:]
 
     results = []
     # --- 汇总级：每个汇总独立（cid = -summary_id）---
     sids_all = [sid for sid, _ in src_list]
     for sid, sname in src_list:
-        top25, bottom24 = build_grid([sid])
+        top25, bottom24, top36, bottom13 = build_grid([sid])
         if top25 is None:
             continue
-        for threshold, nums in [(25, top25), (24, bottom24)]:
+        for threshold, nums in [(25, top25), (24, bottom24), (36, top36), (13, bottom13)]:
             db.execute(
                 "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,?,?,?)",
                 (use_date, -sid, threshold, json.dumps(nums)))
@@ -4730,9 +4745,9 @@ def _compute_threshold_one_date(use_date, db=None):
 
     # --- 集合14：前4汇总聚合 ---
     if len(sids_all) >= 4:
-        top25, bottom24 = build_grid(sids_all[:4])
+        top25, bottom24, top36, bottom13 = build_grid(sids_all[:4])
         if top25:
-            for threshold, nums in [(25, top25), (24, bottom24)]:
+            for threshold, nums in [(25, top25), (24, bottom24), (36, top36), (13, bottom13)]:
                 db.execute(
                     "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,14,?,?)",
                     (use_date, threshold, json.dumps(nums)))
@@ -4740,9 +4755,9 @@ def _compute_threshold_one_date(use_date, db=None):
 
     # --- 集合16：前6汇总聚合 ---
     if len(sids_all) >= 6:
-        top25, bottom24 = build_grid(sids_all[:6])
+        top25, bottom24, top36, bottom13 = build_grid(sids_all[:6])
         if top25:
-            for threshold, nums in [(25, top25), (24, bottom24)]:
+            for threshold, nums in [(25, top25), (24, bottom24), (36, top36), (13, bottom13)]:
                 db.execute(
                     "INSERT OR REPLACE INTO collection_threshold_numbers (date, collection_id, threshold, numbers_json) VALUES (?,16,?,?)",
                     (use_date, threshold, json.dumps(nums)))
@@ -5007,7 +5022,7 @@ def threshold_vote(date: str = None, stores: str = None, vote: int = 2, directio
         rec = db.execute("SELECT MAX(date) as dt FROM collection_threshold_numbers").fetchone()
         use_date = rec["dt"] if rec else dt.today().isoformat()
 
-    th_val = 25 if direction == "positive" else 24
+    th_val = {"positive": 25, "negative": 24, "positive36": 36, "negative13": 13}.get(direction, 25)
 
     # 解析门店ID（支持 summary_id 和 collection_id 14/16）
     if stores:
@@ -5078,6 +5093,776 @@ def threshold_vote(date: str = None, stores: str = None, vote: int = 2, directio
         "consensus": consensus,
         "frequencies": {str(n): cnt for n, cnt in sorted(freq.items()) if cnt >= vote}
     }
+
+
+@app.get("/api/track-36")
+def track_36(x: int = 5, start_date: str = "2026-01-01", end_date: str = None):
+    """跟踪正36：逐期共识号码（≥x店选中）+ 开奖号 + 命中 + 累计盈亏。
+    盈亏口径：等额每号1元，命中返47倍（命中 +47-N，未中 -N，N=共识号数）。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    draw_map = {r["date"]: r["draw_number"] for r in db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND draw_number>0", (start_date,))}
+    num_map = {}
+    for r in db.execute(
+        "SELECT date, collection_id, numbers_json FROM collection_threshold_numbers WHERE date>=? AND threshold=36",
+        (start_date,)):
+        num_map.setdefault(r["date"], []).append(json.loads(r["numbers_json"]))
+    db.close()
+
+    daily = []
+    hits = 0
+    cum_pnl = 0
+    for d in sorted(num_map.keys()):
+        if end_date and d > end_date:
+            continue
+        draw = draw_map.get(d)
+        if draw is None:
+            continue
+        vote = {}
+        for nums in num_map[d]:
+            for n in nums:
+                vote[n] = vote.get(n, 0) + 1
+        picked = sorted([n for n, c in vote.items() if c >= x])
+        hit = draw in picked
+        pnl = (47 - len(picked)) if hit else (-len(picked))
+        if hit:
+            hits += 1
+        cum_pnl += pnl
+        daily.append({
+            "date": d, "draw": draw, "picked": picked,
+            "picked_count": len(picked), "hit": hit,
+            "pnl": pnl, "cum_pnl": cum_pnl,
+        })
+
+    total = len(daily)
+    return {
+        "ok": True, "x": x, "start": start_date,
+        "daily": daily, "total_days": total, "hits": hits,
+        "hit_rate": round(hits / total * 100, 2) if total else 0,
+        "cum_pnl": cum_pnl,
+        "avg_picked": round(sum(dd["picked_count"] for dd in daily) / total, 1) if total else 0,
+    }
+
+
+@app.get("/api/track-36/stores")
+def track_36_stores(date: str = None):
+    """返回指定日期 8 个门店的正36号 + 累计值（走势图用）。
+    每个门店 items36 = 前36号(累计值降序)，items13 = 后13号。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+
+    src_rows = db.execute(
+        "SELECT summary_id, summary_name FROM daily_snapshots WHERE date=? AND collection_id=19 ORDER BY summary_id LIMIT 6",
+        (date,)).fetchall()
+    if not src_rows:
+        db.close()
+        return {"ok": False, "error": "无快照数据", "date": date}
+
+    def build_grid(sids):
+        pids = [r[0] for r in db.execute(
+            f"SELECT DISTINCT rgi.project_id FROM run_group_items rgi JOIN run_groups rg ON rgi.run_group_id = rg.id "
+            f"WHERE rg.summary_id IN ({','.join('?' * len(sids))})", sids).fetchall()]
+        if not pids:
+            return None
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({','.join('?' * len(pids))}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [date]).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    sids_all = [r["summary_id"] for r in src_rows]
+    stores = []
+    for r in src_rows:
+        g = build_grid([r["summary_id"]])
+        if not g:
+            continue
+        stores.append({
+            "id": r["summary_id"], "name": r["summary_name"],
+            "items36": [{"num": n, "value": v} for n, v in g[13:]],
+            "items13": [{"num": n, "value": v} for n, v in g[36:]],
+        })
+    if len(sids_all) >= 4:
+        g = build_grid(sids_all[:4])
+        if g:
+            stores.append({"id": 14, "name": "集合14",
+                           "items36": [{"num": n, "value": v} for n, v in g[13:]],
+                           "items13": [{"num": n, "value": v} for n, v in g[36:]]})
+    if len(sids_all) >= 6:
+        g = build_grid(sids_all[:6])
+        if g:
+            stores.append({"id": 16, "name": "集合16",
+                           "items36": [{"num": n, "value": v} for n, v in g[13:]],
+                           "items13": [{"num": n, "value": v} for n, v in g[36:]]})
+
+    db.close()
+    return {"ok": True, "date": date, "stores": stores}
+
+
+@app.get("/api/track-36/records")
+def track_36_records(date: str = None, start_date: str = "2026-01-01"):
+    """25 个记录组（记录1-25）的正36号列表 + 按月份命中色块。
+    每个记录组取指定日期(默认最新开奖日)的正36号(固定36号)，回溯 start_date 起每期是否命中。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+    draw_map = {r["date"]: r["draw_number"] for r in db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0", (start_date, date))}
+
+    def build_grid_by_rg(rg_id):
+        pids = [r[0] for r in db.execute("SELECT DISTINCT project_id FROM run_group_items WHERE run_group_id=?", (rg_id,)).fetchall()]
+        if not pids:
+            return None
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({','.join('?' * len(pids))}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [date]).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    # 25 个记录组（按 summary 分组）
+    rg_rows = db.execute(
+        "SELECT rg.id, rg.name, rg.summary_id, s.name AS summary_name "
+        "FROM run_groups rg LEFT JOIN summaries s ON rg.summary_id = s.id "
+        "ORDER BY rg.id").fetchall()
+
+    # 按门店分组
+    stores = {}
+    for r in rg_rows:
+        sid = r["summary_id"]
+        if sid not in stores:
+            stores[sid] = {"summary_id": sid, "summary_name": r["summary_name"], "records": []}
+        g = build_grid_by_rg(r["id"])
+        nums36 = [n for n, _ in g[13:]] if g else []
+        numset = set(nums36)
+        # 回溯命中（按月分组）
+        monthly = []
+        cur_month = None
+        for d in sorted(draw_map.keys()):
+            if d > date:
+                continue
+            m = d[:7]
+            hit = draw_map[d] in numset
+            if m != cur_month:
+                monthly.append({"month": m, "days": []})
+                cur_month = m
+            monthly[-1]["days"].append({"d": d[8:], "hit": hit})
+        stores[sid]["records"].append({
+            "id": r["id"], "name": r["name"],
+            "items36": nums36,
+            "monthly": monthly,
+            "hit_total": sum(1 for mo in monthly for day in mo["days"] if day["hit"]),
+            "day_total": sum(len(mo["days"]) for mo in monthly),
+        })
+
+    db.close()
+    return {"ok": True, "date": date, "start": start_date,
+            "stores": [stores[k] for k in sorted(stores.keys())]}
+
+
+@app.get("/api/track-36/roi")
+def track_36_roi(date: str = None, start_date: str = "2026-01-01", n: int = 19):
+    """按月份展示每天命中记录数 + 区间 ROI 演算。
+    命中记录数 K = 当天开奖号覆盖多少个记录组(25个)的36号。
+    下注口径：等额下注「被≥n个记录组覆盖的共识号」，命中返47倍。
+    按 K 分区间统计 ROI。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+    draw_map = {r["date"]: r["draw_number"] for r in db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0", (start_date, date))}
+
+    def build_grid_by_rg(rg_id):
+        pids = [r[0] for r in db.execute("SELECT DISTINCT project_id FROM run_group_items WHERE run_group_id=?", (rg_id,)).fetchall()]
+        if not pids:
+            return None
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({','.join('?' * len(pids))}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [date]).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    rg_rows = db.execute("SELECT id, name FROM run_groups ORDER BY id").fetchall()
+    record_nums = {}
+    for r in rg_rows:
+        g = build_grid_by_rg(r["id"])
+        record_nums[r["id"]] = set(nn for nn, _ in g[13:]) if g else set()
+
+    # 每天：K + 共识号
+    days = []
+    for d in sorted(draw_map.keys()):
+        draw = draw_map[d]
+        K = sum(1 for nums in record_nums.values() if draw in nums)
+        cover = {}
+        for nums in record_nums.values():
+            for nn in nums:
+                cover[nn] = cover.get(nn, 0) + 1
+        picked = [nn for nn, c in cover.items() if c >= n]
+        hit = draw in picked
+        pnl = (47 - len(picked)) if hit else (-len(picked))
+        days.append({"date": d, "draw": draw, "K": K, "picked_count": len(picked), "hit": hit, "pnl": pnl})
+
+    # 按月份分组
+    monthly = []
+    cur = None
+    for day in days:
+        m = day["date"][:7]
+        if m != cur:
+            monthly.append({"month": m, "days": []})
+            cur = m
+        monthly[-1]["days"].append({"d": day["date"][8:], "K": day["K"]})
+
+    # K 区间 ROI
+    intervals = [(0, 15), (15, 18), (18, 21), (21, 26)]
+    roi_intervals = []
+    for lo, hi in intervals:
+        sub = [day for day in days if lo <= day["K"] < hi]
+        if not sub:
+            continue
+        hits = sum(1 for day in sub if day["hit"])
+        total_cost = sum(day["picked_count"] for day in sub)
+        roi = round((hits * 47 - total_cost) / total_cost * 100, 1) if total_cost else 0
+        roi_intervals.append({
+            "lo": lo, "hi": hi,
+            "days": len(sub), "hits": hits,
+            "hit_rate": round(hits / len(sub) * 100, 1),
+            "avg_picked": round(total_cost / len(sub), 1),
+            "roi": roi,
+        })
+
+    db.close()
+    return {"ok": True, "date": date, "start": start_date, "n": n,
+            "monthly": monthly, "roi_intervals": roi_intervals}
+
+
+@app.get("/api/track-36/matrix")
+def track_36_matrix(date: str = None, start_date: str = "2026-01-01"):
+    """按月份 × 选几组(选前K个高命中率记录组)的命中/未中色块矩阵。
+    命中 = 当天开奖号在「选中的K组36号并集」里。每个K档位附带并集号码(供点击查看)。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+    draw_map = {r["date"]: r["draw_number"] for r in db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0", (start_date, date))}
+
+    def build_grid_by_rg(rg_id):
+        pids = [r[0] for r in db.execute("SELECT DISTINCT project_id FROM run_group_items WHERE run_group_id=?", (rg_id,)).fetchall()]
+        if not pids:
+            return None
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({','.join('?' * len(pids))}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [date]).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    rg_rows = db.execute("SELECT id, name FROM run_groups ORDER BY id").fetchall()
+    record_nums = {}
+    for r in rg_rows:
+        g = build_grid_by_rg(r["id"])
+        record_nums[r["id"]] = set(nn for nn, _ in g[13:]) if g else set()
+
+    # 按历史命中率降序排序记录组
+    sorted_rg = sorted(record_nums.keys(), key=lambda rid: -sum(1 for d, dr in draw_map.items() if dr in record_nums[rid]))
+
+    k_levels = [1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 18, 25]
+    matrix = []
+    for K in k_levels:
+        selected = sorted_rg[:K]
+        union = set()
+        for rid in selected:
+            union |= record_nums[rid]
+        union_list = sorted(union)
+        # 按月份分组命中
+        monthly = []
+        cur = None
+        for d in sorted(draw_map.keys()):
+            draw = draw_map[d]
+            hit = draw in union
+            m = d[:7]
+            if m != cur:
+                monthly.append({"month": m, "days": []})
+                cur = m
+            monthly[-1]["days"].append({"d": d[8:], "draw": draw, "hit": hit})
+        hits = sum(1 for mo in monthly for day in mo["days"] if day["hit"])
+        total = sum(len(mo["days"]) for mo in monthly)
+        matrix.append({
+            "K": K, "union": union_list, "union_count": len(union_list),
+            "hits": hits, "total": total,
+            "hit_rate": round(hits / total * 100, 1) if total else 0,
+            "monthly": monthly,
+        })
+
+    db.close()
+    return {"ok": True, "date": date, "start": start_date,
+            "k_levels": k_levels, "matrix": matrix}
+
+
+@app.get("/api/track-36/vote-scan")
+def track_36_vote_scan(date: str = None, start_date: str = "2026-01-01"):
+    """投票选号扫描：25 记录组投票，共识号 = 被≥T个记录组覆盖的号。
+    扫描 T=1~25，返回每个 T 的平均共识号数、命中率、ROI（等额·命中返47）。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+    draw_map = {r["date"]: r["draw_number"] for r in db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0", (start_date, date))}
+
+    def build_grid_by_rg(rg_id):
+        pids = [r[0] for r in db.execute("SELECT DISTINCT project_id FROM run_group_items WHERE run_group_id=?", (rg_id,)).fetchall()]
+        if not pids:
+            return None
+        sr_rows = db.execute(
+            f"SELECT sr.count_n, sr.numbers_json FROM sim_results sr JOIN sim_runs srn ON sr.run_id = srn.id "
+            f"WHERE srn.project_id IN ({','.join('?' * len(pids))}) AND sr.date=? "
+            f"AND srn.id = (SELECT MAX(id) FROM sim_runs WHERE project_id = srn.project_id)",
+            pids + [date]).fetchall()
+        if not sr_rows:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        for sr in sr_rows:
+            val = cv_map.get(sr["count_n"], 0)
+            for num in json.loads(sr["numbers_json"]):
+                if 1 <= num <= 49:
+                    pos[num] += val
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    rg_rows = db.execute("SELECT id FROM run_groups ORDER BY id").fetchall()
+    record_nums = {}
+    for r in rg_rows:
+        g = build_grid_by_rg(r["id"])
+        record_nums[r["id"]] = set(nn for nn, _ in g[13:]) if g else set()
+
+    days = []
+    for d in sorted(draw_map.keys()):
+        draw = draw_map[d]
+        cover = {}
+        for nums in record_nums.values():
+            for nn in nums:
+                cover[nn] = cover.get(nn, 0) + 1
+        days.append({"draw": draw, "cover": cover})
+
+    total = len(days)
+    scan = []
+    best_hr = 1
+    best_hr_val = -1
+    best_roi = 1
+    best_roi_val = -1e9
+    for T in range(1, 26):
+        hits = 0
+        cost = 0
+        for day in days:
+            picked = [nn for nn, c in day["cover"].items() if c >= T]
+            cost += len(picked)
+            if day["draw"] in picked:
+                hits += 1
+        hit_rate = round(hits / total * 100, 1) if total else 0
+        avg = round(cost / total, 1) if total else 0
+        roi = round((hits * 47 - cost) / cost * 100, 1) if cost else 0
+        scan.append({"T": T, "avg_picked": avg, "hit_rate": hit_rate, "roi": roi})
+        if hit_rate > best_hr_val:
+            best_hr_val = hit_rate
+            best_hr = T
+        if cost > 0 and roi > best_roi_val:
+            best_roi_val = roi
+            best_roi = T
+
+    db.close()
+    return {"ok": True, "date": date, "start": start_date,
+            "scan": scan, "best_hit_rate": best_hr, "best_roi": best_roi}
+
+
+_vote_freq_cache = {}
+
+
+@app.get("/api/track-36/vote-freq")
+def track_36_vote_freq(date: str = None, start_date: str = "2026-01-01", c: int = None, lo: int = 18, hi: int = 19):
+    """逐日投票 · 出现次数分档/区间演算。
+    每天用当天 25 个记录组(记录1~25)的36号投票，统计每个号码被多少组选中(出现次数1~25)。
+    分档：取出现次数恰好==c 的号码(c=1~25)；区间：取出现次数在[lo,hi]的号码。
+    等额下注·命中返47倍。c 参数可返回指定档位每天明细。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+
+    # 缓存 key（含 sim_results 最新 id，数据更新自动失效）
+    max_sr_id = db.execute("SELECT MAX(id) m FROM sim_results").fetchone()["m"]
+    ck = (start_date, date, max_sr_id)
+    days = _vote_freq_cache.get(ck)
+    if days is None:
+        cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+        rg_projects = {}
+        for r in db.execute("SELECT run_group_id, project_id FROM run_group_items").fetchall():
+            rg_projects.setdefault(r["run_group_id"], []).append(r["project_id"])
+        proj_maxrun = {r["project_id"]: r["mid"] for r in db.execute("SELECT project_id, MAX(id) mid FROM sim_runs GROUP BY project_id").fetchall()}
+        valid_runs = list(proj_maxrun.values())
+        mem = {}
+        if valid_runs:
+            q = ",".join("?" * len(valid_runs))
+            for sr in db.execute(
+                f"SELECT run_id, date, count_n, numbers_json FROM sim_results WHERE run_id IN ({q}) AND date>=? AND date<=?",
+                valid_runs + [start_date, date]).fetchall():
+                mem.setdefault((sr["run_id"], sr["date"]), []).append((sr["count_n"], sr["numbers_json"]))
+
+        def build_fast(rg_id, d):
+            pids = rg_projects.get(rg_id)
+            if not pids:
+                return None
+            pos = {n: 0 for n in range(1, 50)}
+            found = False
+            for p in pids:
+                run = proj_maxrun.get(p)
+                if run is None:
+                    continue
+                for cnt, nj in mem.get((run, d), []):
+                    found = True
+                    val = cv_map.get(cnt, 0)
+                    if val == 0:
+                        continue
+                    for num in json.loads(nj):
+                        if 1 <= num <= 49:
+                            pos[num] += val
+            if not found:
+                return None
+            return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+        rg_ids = sorted(rg_projects.keys())
+        days = []
+        for r in db.execute(
+            "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0 ORDER BY date",
+            (start_date, date)).fetchall():
+            cover = {}
+            for rg in rg_ids:
+                g = build_fast(rg, r["date"])
+                if g:
+                    for n, _ in g[13:]:
+                        cover[n] = cover.get(n, 0) + 1
+            days.append({"date": r["date"], "draw": r["draw_number"], "cover": cover})
+        _vote_freq_cache[ck] = days
+        if len(_vote_freq_cache) > 4:
+            for k in list(_vote_freq_cache.keys())[:-4]:
+                _vote_freq_cache.pop(k, None)
+
+    db.close()
+    total = len(days)
+
+    scan = []
+    best_hr = best_roi = 1
+    best_hr_val = -1.0
+    best_roi_val = -1e9
+    for cc in range(1, 26):
+        hits = cost = days_with = 0
+        for day in days:
+            picked = [n for n, cnt in day["cover"].items() if cnt == cc]
+            if picked:
+                days_with += 1
+                cost += len(picked)
+                if day["draw"] in picked:
+                    hits += 1
+        hit_rate = round(hits / total * 100, 1) if total else 0
+        avg = round(cost / days_with, 1) if days_with else 0
+        roi = round((hits * 47 - cost) / cost * 100, 1) if cost else 0
+        scan.append({"c": cc, "days_with": days_with, "avg_picked": avg,
+                     "hits": hits, "hit_rate": hit_rate, "roi": roi})
+        if hits >= 20 and hit_rate > best_hr_val:
+            best_hr_val = hit_rate
+            best_hr = cc
+        if hits >= 20 and cost > 0 and roi > best_roi_val:
+            best_roi_val = roi
+            best_roi = cc
+
+    def interval(lo, hi):
+        hits = cost = days_with = 0
+        for day in days:
+            picked = [n for n, cnt in day["cover"].items() if lo <= cnt <= hi]
+            if picked:
+                days_with += 1
+                cost += len(picked)
+                if day["draw"] in picked:
+                    hits += 1
+        hit_rate = round(hits / total * 100, 1) if total else 0
+        avg = round(cost / days_with, 1) if days_with else 0
+        roi = round((hits * 47 - cost) / cost * 100, 1) if cost else 0
+        return {"lo": lo, "hi": hi, "days_with": days_with, "avg_picked": avg,
+                "hits": hits, "hit_rate": hit_rate, "roi": roi}
+
+    intervals = [interval(lo, hi) for lo, hi in
+                 [(15, 20), (16, 20), (17, 20), (18, 20), (18, 19), (19, 20), (15, 19)]]
+
+    detail = None
+    if c is not None and 1 <= c <= 25:
+        detail = []
+        for day in days:
+            picked = sorted(n for n, cnt in day["cover"].items() if cnt == c)
+            if picked:
+                detail.append({"date": day["date"], "draw": day["draw"],
+                               "hit": day["draw"] in picked, "picked": picked})
+
+    # 区间逐日明细（默认 18~19，供色块矩阵点击查看）
+    monthly = []
+    cur = None
+    for day in days:
+        picked = sorted(n for n, cnt in day["cover"].items() if lo <= cnt <= hi)
+        m = day["date"][:7]
+        if m != cur:
+            monthly.append({"month": m, "days": []})
+            cur = m
+        monthly[-1]["days"].append({
+            "d": day["date"][8:],
+            "draw": day["draw"],
+            "hit": day["draw"] in picked,
+            "picked": picked,
+        })
+
+    return {"ok": True, "date": date, "start": start_date,
+            "scan": scan, "intervals": intervals,
+            "best_hit_rate": best_hr, "best_roi": best_roi, "detail": detail,
+            "monthly": monthly, "lo": lo, "hi": hi}
+
+
+_vote_top20_cache = {}
+
+
+@app.get("/api/track-36/vote-top20")
+def track_36_vote_top20(date: str = None, start_date: str = "2026-01-01", lo: int = 12, hi: int = 16):
+    """30天选组 · 15/16/17次投票。
+    逐日滚动：每天用当天往前30期评估25个记录组错误数(36码未命中天数)，
+    取错误最少的20组，这20组当天投票，取出现次数=15/16/17的号码。
+    等额下注·命中返47倍。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    if not date:
+        date = db.execute("SELECT MAX(date) d FROM records WHERE draw_number > 0").fetchone()["d"]
+    today_date = db.execute("SELECT MAX(date) d FROM sim_results").fetchone()["d"]
+
+    max_sr_id = db.execute("SELECT MAX(id) m FROM sim_results").fetchone()["m"]
+    ck = (start_date, date, max_sr_id, lo, hi)
+    if ck in _vote_top20_cache:
+        db.close()
+        return _vote_top20_cache[ck]
+
+    # 起始日期往前推 45 天，保证 start_date 当天有完整 30 期窗口
+    from datetime import datetime as _dt, timedelta as _td
+    pre_date = (_dt.strptime(start_date, "%Y-%m-%d") - _td(days=45)).strftime("%Y-%m-%d")
+
+    cv_map = {r["count_n"]: r["value"] for r in db.execute("SELECT count_n, value FROM count_value_map").fetchall()}
+    rg_projects = {}
+    for r in db.execute("SELECT run_group_id, project_id FROM run_group_items").fetchall():
+        rg_projects.setdefault(r["run_group_id"], []).append(r["project_id"])
+    proj_maxrun = {r["project_id"]: r["mid"] for r in db.execute("SELECT project_id, MAX(id) mid FROM sim_runs GROUP BY project_id").fetchall()}
+    valid_runs = list(proj_maxrun.values())
+    mem = {}
+    if valid_runs:
+        q = ",".join("?" * len(valid_runs))
+        for sr in db.execute(
+            f"SELECT run_id, date, count_n, numbers_json FROM sim_results WHERE run_id IN ({q}) AND date>=? AND date<=?",
+            valid_runs + [pre_date, today_date]).fetchall():
+            mem.setdefault((sr["run_id"], sr["date"]), []).append((sr["count_n"], sr["numbers_json"]))
+
+    def build_fast(rg_id, d):
+        pids = rg_projects.get(rg_id)
+        if not pids:
+            return None
+        pos = {n: 0 for n in range(1, 50)}
+        found = False
+        for p in pids:
+            run = proj_maxrun.get(p)
+            if run is None:
+                continue
+            for cnt, nj in mem.get((run, d), []):
+                found = True
+                val = cv_map.get(cnt, 0)
+                if val == 0:
+                    continue
+                for num in json.loads(nj):
+                    if 1 <= num <= 49:
+                        pos[num] += val
+        if not found:
+            return None
+        return sorted(pos.items(), key=lambda x: x[1], reverse=True)
+
+    rg_ids = sorted(rg_projects.keys())
+    rg36 = {}
+
+    def get36(rg, d):
+        k = (rg, d)
+        if k not in rg36:
+            g = build_fast(rg, d)
+            # 负36 = 累计值最低的36个号（排除累计值最高的13个）
+            rg36[k] = frozenset(n for n, _ in g[13:]) if g else frozenset()
+        return rg36[k]
+
+    draw_rows = db.execute(
+        "SELECT date, draw_number FROM records WHERE date>=? AND date<=? AND draw_number>0 ORDER BY date",
+        (pre_date, date)).fetchall()
+    dates = [r["date"] for r in draw_rows]
+    draw_map = {r["date"]: r["draw_number"] for r in draw_rows}
+
+    WIN = 30
+    TOP = 20
+    freq_daily = {c: [] for c in range(8, 21)}
+
+    daily = []
+    for idx, d in enumerate(dates):
+        if d < start_date:
+            continue
+        start_i = idx - WIN
+        if start_i < 0:
+            continue
+        window = dates[start_i:idx]
+        errs = {}
+        for rg in rg_ids:
+            e = 0
+            for wd in window:
+                s = get36(rg, wd)
+                if not s or draw_map[wd] not in s:
+                    e += 1
+            errs[rg] = e
+        top20 = sorted(rg_ids, key=lambda x: errs[x])[:TOP]
+        cover = {}
+        for rg in top20:
+            s = get36(rg, d)
+            for n in s:
+                cover[n] = cover.get(n, 0) + 1
+        for cc in range(8, 21):
+            pc = sorted(n for n, c in cover.items() if c == cc)
+            if pc:
+                freq_daily[cc].append({"date": d, "draw": draw_map[d],
+                                       "hit": draw_map[d] in pc, "picked": pc})
+        picked = sorted(n for n, c in cover.items() if lo <= c <= hi)
+        daily.append({"date": d, "draw": draw_map[d],
+                      "hit": draw_map[d] in picked, "picked": picked,
+                      "picked_count": len(picked)})
+
+    total = len(daily)
+    hits = sum(1 for x in daily if x["hit"])
+    cost = sum(x["picked_count"] for x in daily)
+    hit_rate = round(hits / total * 100, 1) if total else 0
+    roi = round((hits * 47 - cost) / cost * 100, 1) if cost else 0
+    avg_picked = round(cost / total, 1) if total else 0
+
+    monthly = []
+    cur = None
+    for x in daily:
+        m = x["date"][:7]
+        if m != cur:
+            monthly.append({"month": m, "days": []})
+            cur = m
+        monthly[-1]["days"].append({"d": x["date"][8:], "draw": x["draw"],
+                                    "hit": x["hit"], "picked": x["picked"]})
+
+    freq_scan = []
+    for cc in range(8, 21):
+        fd = freq_daily[cc]
+        fhits = sum(1 for x in fd if x["hit"])
+        fcost = sum(len(x["picked"]) for x in fd)
+        fhr = round(fhits / total * 100, 1) if total else 0
+        favg = round(fcost / total, 1) if total else 0
+        froi = round((fhits * 47 - fcost) / fcost * 100, 1) if fcost else 0
+        fm = []
+        cur = None
+        for x in fd:
+            m = x["date"][:7]
+            if m != cur:
+                fm.append({"month": m, "days": []})
+                cur = m
+            fm[-1]["days"].append({"d": x["date"][8:], "draw": x["draw"],
+                                   "hit": x["hit"], "picked": x["picked"]})
+        freq_scan.append({"c": cc, "avg_picked": favg, "hits": fhits,
+                          "hit_rate": fhr, "roi": froi, "monthly": fm})
+
+    # 今天（最新 sim_results 日期）的负36号码，按 8~20 档位
+    today_freq = {}
+    if today_date and today_date >= start_date:
+        recent_draws = [d for d in dates if d < today_date][-30:]
+        errs_t = {}
+        for rg in rg_ids:
+            e = 0
+            for wd in recent_draws:
+                s = get36(rg, wd)
+                if not s or draw_map.get(wd) not in s:
+                    e += 1
+            errs_t[rg] = e
+        top20_t = sorted(rg_ids, key=lambda x: errs_t[x])[:TOP]
+        cover_t = {}
+        for rg in top20_t:
+            s = get36(rg, today_date)
+            for n in s:
+                cover_t[n] = cover_t.get(n, 0) + 1
+        for c in range(8, 21):
+            today_freq[str(c)] = sorted(n for n, cnt in cover_t.items() if cnt == c)
+
+    result = {"ok": True, "date": date, "start": start_date,
+              "summary": {"total": total, "hits": hits, "hit_rate": hit_rate,
+                          "roi": roi, "avg_picked": avg_picked},
+              "latest": daily[-1] if daily else None,
+              "monthly": monthly,
+              "freq_scan": freq_scan,
+              "today": {"date": today_date, "freq": today_freq}}
+    _vote_top20_cache[ck] = result
+    if len(_vote_top20_cache) > 4:
+        for k in list(_vote_top20_cache.keys())[:-4]:
+            _vote_top20_cache.pop(k, None)
+
+    db.close()
+    return result
 
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
@@ -5178,6 +5963,146 @@ def get_missing_numbers(date: str = None):
         "latest_date": latest_date,
         "total_records": total_records
     }
+
+
+# ═══════════════ 冷号规律（历史最冷号演变） ═══════════════
+@app.get("/api/cold-pattern-history")
+def cold_pattern_history(limit: int = 0):
+    """历史最冷号演变：流式计算每天的最冷号，找出「最冷号变化」时间点。
+    每个变化点返回：最冷号成为最冷的日期 + 当时遗漏（起点）；
+    以及该最冷号 + 左右邻居(±1±2) + 12等差组(mod12同余)的「当前」遗漏（最近一次距今几期）+ 总出现次数。
+    limit>0 时只返回最近 limit 个变化点（倒序）。"""
+    db = get_db()
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT date, draw_number FROM records ORDER BY date ASC").fetchall()
+    db.close()
+    if not rows:
+        return {"error": "无记录"}
+
+    total = len(rows)
+    latest_date = rows[-1]["date"]
+
+    # 1. 当前全量统计：每个号 current_gap（距最新日期几期）+ count（历史总出现次数）
+    last_seen = {}
+    last_seen_date = {}
+    count = {n: 0 for n in range(1, 50)}
+    for i, r in enumerate(rows):
+        draw = r["draw_number"]
+        if draw and 1 <= draw <= 49:
+            last_seen[draw] = i
+            last_seen_date[draw] = r["date"]
+            count[draw] += 1
+    full = {}
+    for n in range(1, 50):
+        full[n] = {
+            "num": n,
+            "gap": (total - 1 - last_seen[n]) if n in last_seen else total,  # 最近一次距今几期
+            "count": count[n],  # 总出现次数
+            "last_seen_date": last_seen_date.get(n),  # 最后一次开出日期
+        }
+
+    # 后缀窗口计数：suffix[i][n] = 号 n 在 rows[i:]（含第 i 期）到最新期的出现次数
+    suffix = [None] * total
+    running = {n: 0 for n in range(1, 50)}
+    for i in range(total - 1, -1, -1):
+        d = rows[i]["draw_number"]
+        if d and 1 <= d <= 49:
+            running[d] += 1
+        suffix[i] = dict(running)
+
+    # 每个号的开出索引列表（升序），用于找「下一次开出」
+    occurrences = {n: [] for n in range(1, 50)}
+    for i, r in enumerate(rows):
+        d = r["draw_number"]
+        if d and 1 <= d <= 49:
+            occurrences[d].append(i)
+
+    # 2. 流式计算历史最冷号变化点（只算日期 + 最冷号 + 当时遗漏）
+    last_seen2 = {}
+    prev_cold = None
+    prev_change_i = None
+    prev_change_date = None
+    history = []
+    for i, r in enumerate(rows):
+        date = r["date"]
+        draw = r["draw_number"]
+        gap_map = {}
+        for n in range(1, 50):
+            gap_map[n] = (i - last_seen2[n]) if n in last_seen2 else (i + 1)
+        cold_num = max(gap_map, key=gap_map.get)
+        cold_gap = gap_map[cold_num]
+
+        if cold_num != prev_cold:
+            # 遗漏周期（周期①）：起=成为冷号前的上次开出，止=成为冷号后的下次开出（无则至今）
+            start1 = last_seen2.get(cold_num, 0)
+            occ = occurrences[cold_num]
+            pos = bisect.bisect_right(occ, i)
+            end1 = occ[pos] if pos < len(occ) else None
+            c1_start_date = rows[start1]["date"]
+            c1_end_date = rows[end1]["date"] if end1 is not None else None
+            period1_len = (end1 if end1 is not None else (total - 1)) - start1
+            # 邻居/等差组：冷号任期（成为冷号→被取代/至今）内出现次数，先记 suffix[i]，后处理减被取代后部分
+            neighbors = []
+            for n in range(max(1, cold_num - 2), min(49, cold_num + 2) + 1):
+                if n == cold_num:
+                    continue
+                neighbors.append({
+                    "num": n,
+                    "count": suffix[i][n],   # 冷号任期出现次数（后处理修正）
+                    "gap": full[n]["gap"],
+                })
+            # 12 等差组（mod 12 同余，步长 ±12，1-49 内）
+            mod_class = []
+            for n in range(1, 50):
+                if n % 12 == cold_num % 12:
+                    mod_class.append({
+                        "num": n,
+                        "count": suffix[i][n],
+                        "gap": full[n]["gap"],
+                    })
+            history.append({
+                "_i": i,
+                "num": cold_num,
+                "date": date,                    # 成为冷号日期
+                "period1_start": c1_start_date,  # 遗漏周期起（上次开出）
+                "period1_end": c1_end_date,      # 遗漏周期止（下次开出，None=至今）
+                "period1_len": period1_len,      # 遗漏周期期数
+                "current": {
+                    "num": cold_num,
+                    "gap": full[cold_num]["gap"],   # 当前遗漏（相对最新）
+                },
+                "neighbors": neighbors,
+                "mod_class": mod_class,
+            })
+            prev_cold = cold_num
+
+        if draw and 1 <= draw <= 49:
+            last_seen2[draw] = i
+
+    # 补「被取代日期」和「冷号任期期数」，并把小卡片 count 修正为冷号任期内出现次数
+    for k in range(len(history)):
+        if k + 1 < len(history):
+            next_i = history[k + 1]["_i"]
+            history[k]["end_date"] = history[k + 1]["date"]
+            history[k]["term_len"] = next_i - history[k]["_i"]
+            for item in history[k]["neighbors"]:
+                item["count"] -= suffix[next_i][item["num"]]
+            for item in history[k]["mod_class"]:
+                item["count"] -= suffix[next_i][item["num"]]
+        else:
+            history[k]["end_date"] = None
+            history[k]["term_len"] = total - history[k]["_i"]
+        history[k].pop("_i", None)
+
+    history.reverse()  # 倒序：最新的在前
+    if limit and limit > 0:
+        history = history[:limit]
+    return {
+        "history": history,
+        "total_changes": len(history),
+        "latest_date": latest_date,
+    }
+
 
 # ═══════════════ 最长号码每日记录台账 ═══════════════
 def _compute_longest_log_stats(db):
